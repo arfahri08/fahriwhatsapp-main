@@ -106,7 +106,7 @@ async function scanWithMock(buffer, rawText, options = {}) {
 async function run() {
     const initialHealth = ocr.getAntiToxicStickerOcrHealth({ toxicWords: WORDS })
     assert.equal(initialHealth.worker, "LAZY", "require must not initialize worker")
-    assert.equal(initialHealth.cacheVersion, "anti-toxic-sticker-ocr-v2")
+    assert.equal(initialHealth.cacheVersion, "anti-toxic-sticker-ocr-v3")
     assert.equal(initialHealth.containsTai, true)
 
     for (const raw of ["TAI", "tai", "TaI", "TA1", "TAl", "T A I", "T.A.I", "T-A-I", "TA!", "TA|", "TÁI", "T\nA\nI"]) {

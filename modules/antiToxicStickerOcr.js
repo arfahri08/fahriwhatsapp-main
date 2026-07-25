@@ -6,7 +6,7 @@ const os = require("os")
 const path = require("path")
 const { execFile, spawnSync } = require("child_process")
 
-const PIPELINE_VERSION = "anti-toxic-sticker-ocr-v2"
+const PIPELINE_VERSION = "anti-toxic-sticker-ocr-v3"
 const resultCache = new Map()
 const inFlightScans = new Map()
 const scanQueue = []
@@ -25,6 +25,10 @@ let workerResetPromise = null
 let workerStatus = "LAZY"
 let workerError = ""
 let ffmpegProbe = null
+let tesseractCliProbe = null
+let pngjsModule = null
+let pngjsLoadAttempted = false
+let pngjsLoadError = ""
 let lastScan = {
     time: null,
     result: "belum ada",
@@ -53,9 +57,9 @@ function getRuntimeConfig() {
             ? parseBool(process.env.ANTI_TOXIC_STICKER_OCR_DEBUG, false)
             : debugOverride,
         maxBytes: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MAX_BYTES, 3 * 1024 * 1024, 1024),
-        maxCandidates: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MAX_CANDIDATES, 10, 1, 20),
+        maxCandidates: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MAX_CANDIDATES, 12, 8, 24),
         maxFrames: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MAX_FRAMES, 5, 1, 8),
-        timeoutMs: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_TIMEOUT_MS, 15000, 1000, 120000),
+        timeoutMs: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_TIMEOUT_MS, 45000, 30000, 120000),
         cacheLimit: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_CACHE_LIMIT, 300, 1, 2000),
         cacheTtlMs: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_CACHE_TTL_MS, 24 * 60 * 60 * 1000, 1000),
         errorCacheTtlMs: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_ERROR_CACHE_TTL_MS, 60 * 1000, 1000),
@@ -63,7 +67,13 @@ function getRuntimeConfig() {
         concurrency: 1,
         ffmpegBin: String(process.env.FFMPEG_BIN || process.env.FFMPEG_PATH || "ffmpeg").trim() || "ffmpeg",
         ffprobeBin: String(process.env.FFPROBE_BIN || "ffprobe").trim() || "ffprobe",
-        mediumConfidence: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MEDIUM_CONFIDENCE, 35, 1, 100),
+        mediumConfidence: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MEDIUM_CONFIDENCE, 25, 1, 100),
+        exactShortConfidence: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_EXACT_SHORT_CONFIDENCE, 10, 0, 100),
+        maxPasses: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MAX_PASSES, 14, 1, 40),
+        pngjsEnabled: parseBool(process.env.ANTI_TOXIC_STICKER_OCR_PNGJS, true),
+        cliEnabled: parseBool(process.env.ANTI_TOXIC_STICKER_OCR_CLI_FALLBACK, true),
+        tesseractBin: String(process.env.TESSERACT_BIN || "tesseract").trim() || "tesseract",
+        cliTimeoutMs: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_CLI_TIMEOUT_MS, 12000, 1000, 60000),
     }
 }
 
@@ -196,6 +206,187 @@ function getSharp(options = {}) {
     return sharpModule
 }
 
+
+function getPngJs() {
+    if (pngjsLoadAttempted) return pngjsModule
+    pngjsLoadAttempted = true
+    try {
+        pngjsModule = require("pngjs")
+        pngjsLoadError = ""
+    } catch (error) {
+        pngjsModule = null
+        pngjsLoadError = shortError(error)
+    }
+    return pngjsModule
+}
+
+function clampByte(value) {
+    return Math.max(0, Math.min(255, Math.round(Number(value) || 0)))
+}
+
+function getOtsuThreshold(values) {
+    const histogram = new Array(256).fill(0)
+    for (const value of values) histogram[clampByte(value)] += 1
+    const total = values.length || 1
+    let sum = 0
+    for (let index = 0; index < 256; index += 1) sum += index * histogram[index]
+    let sumBackground = 0
+    let weightBackground = 0
+    let bestVariance = -1
+    let bestThreshold = 150
+    for (let threshold = 0; threshold < 256; threshold += 1) {
+        weightBackground += histogram[threshold]
+        if (!weightBackground) continue
+        const weightForeground = total - weightBackground
+        if (!weightForeground) break
+        sumBackground += threshold * histogram[threshold]
+        const meanBackground = sumBackground / weightBackground
+        const meanForeground = (sum - sumBackground) / weightForeground
+        const variance = weightBackground * weightForeground * ((meanBackground - meanForeground) ** 2)
+        if (variance > bestVariance) {
+            bestVariance = variance
+            bestThreshold = threshold
+        }
+    }
+    return bestThreshold
+}
+
+function dilateBinary(values, width, height) {
+    const output = values.slice()
+    for (let y = 1; y < height - 1; y += 1) {
+        for (let x = 1; x < width - 1; x += 1) {
+            const index = y * width + x
+            if (values[index] < 128) continue
+            let nearInk = false
+            for (let dy = -1; dy <= 1 && !nearInk; dy += 1) {
+                for (let dx = -1; dx <= 1; dx += 1) {
+                    if (values[(y + dy) * width + (x + dx)] < 128) {
+                        nearInk = true
+                        break
+                    }
+                }
+            }
+            if (nearInk) output[index] = 0
+        }
+    }
+    return output
+}
+
+function renderPngJsVariant(frameBuffer, variant = {}) {
+    const pngjs = getPngJs()
+    if (!pngjs?.PNG?.sync) throw makeOcrError("preprocessing_failed", pngjsLoadError || "pngjs tidak tersedia")
+    const source = pngjs.PNG.sync.read(frameBuffer)
+    const background = variant.background === "black" ? 0 : 255
+    const gray = new Array(source.width * source.height)
+    let minX = source.width
+    let minY = source.height
+    let maxX = -1
+    let maxY = -1
+
+    for (let y = 0; y < source.height; y += 1) {
+        for (let x = 0; x < source.width; x += 1) {
+            const srcIndex = (y * source.width + x) * 4
+            const alpha = Number(source.data[srcIndex + 3] || 0) / 255
+            const red = source.data[srcIndex] * alpha + background * (1 - alpha)
+            const green = source.data[srcIndex + 1] * alpha + background * (1 - alpha)
+            const blue = source.data[srcIndex + 2] * alpha + background * (1 - alpha)
+            const luminance = clampByte(0.299 * red + 0.587 * green + 0.114 * blue)
+            gray[y * source.width + x] = luminance
+            const differs = background === 255 ? luminance < 242 : luminance > 13
+            if (differs) {
+                minX = Math.min(minX, x)
+                minY = Math.min(minY, y)
+                maxX = Math.max(maxX, x)
+                maxY = Math.max(maxY, y)
+            }
+        }
+    }
+
+    if (maxX < minX || maxY < minY) {
+        minX = 0
+        minY = 0
+        maxX = source.width - 1
+        maxY = source.height - 1
+    }
+
+    const sourcePadding = Math.max(2, Math.round(Math.min(source.width, source.height) * 0.025))
+    minX = Math.max(0, minX - sourcePadding)
+    minY = Math.max(0, minY - sourcePadding)
+    maxX = Math.min(source.width - 1, maxX + sourcePadding)
+    maxY = Math.min(source.height - 1, maxY + sourcePadding)
+
+    const cropWidth = Math.max(1, maxX - minX + 1)
+    const cropHeight = Math.max(1, maxY - minY + 1)
+    const requestedScale = Math.max(2, Number(variant.scale || 5))
+    const maxSafeScale = Math.min(1800 / cropWidth, 1800 / cropHeight)
+    const scale = Math.max(1, Math.min(requestedScale, maxSafeScale))
+    const contentWidth = Math.max(1, Math.round(cropWidth * scale))
+    const contentHeight = Math.max(1, Math.round(cropHeight * scale))
+    const padding = Math.max(48, Math.round(Math.min(contentWidth, contentHeight) * 0.12))
+    const outputWidth = contentWidth + padding * 2
+    const outputHeight = contentHeight + padding * 2
+
+    let transformed = gray
+    if (variant.mode && variant.mode !== "gray") {
+        const thresholdBase = getOtsuThreshold(gray)
+        const threshold = clampByte(thresholdBase + Number(variant.thresholdOffset || 0))
+        transformed = gray.map(value => {
+            const isInk = background === 255 ? value <= threshold : value >= threshold
+            return isInk ? 0 : 255
+        })
+        if (variant.dilate) transformed = dilateBinary(transformed, source.width, source.height)
+    } else if (background === 0) {
+        transformed = gray.map(value => 255 - value)
+    }
+
+    const output = new pngjs.PNG({ width: outputWidth, height: outputHeight })
+    output.data.fill(255)
+    for (let targetY = 0; targetY < contentHeight; targetY += 1) {
+        const sourceY = Math.min(maxY, minY + Math.floor(targetY / scale))
+        for (let targetX = 0; targetX < contentWidth; targetX += 1) {
+            const sourceX = Math.min(maxX, minX + Math.floor(targetX / scale))
+            const value = transformed[sourceY * source.width + sourceX]
+            const dstIndex = ((targetY + padding) * outputWidth + targetX + padding) * 4
+            output.data[dstIndex] = value
+            output.data[dstIndex + 1] = value
+            output.data[dstIndex + 2] = value
+            output.data[dstIndex + 3] = 255
+        }
+    }
+    return pngjs.PNG.sync.write(output)
+}
+
+function buildPngJsCandidates(frames, options = {}) {
+    const config = { ...getRuntimeConfig(), ...options }
+    if (!config.pngjsEnabled || !getPngJs()) return []
+    const variants = [
+        { name: "pngjs-white-otsu", background: "white", mode: "threshold", scale: 6 },
+        { name: "pngjs-white-otsu-low", background: "white", mode: "threshold", thresholdOffset: -28, scale: 6 },
+        { name: "pngjs-white-otsu-high", background: "white", mode: "threshold", thresholdOffset: 28, scale: 6 },
+        { name: "pngjs-white-dilate", background: "white", mode: "threshold", dilate: true, scale: 6 },
+        { name: "pngjs-black-otsu", background: "black", mode: "threshold", scale: 6 },
+        { name: "pngjs-white-gray", background: "white", mode: "gray", scale: 5 },
+    ]
+    const candidates = []
+    for (const frame of frames) {
+        for (const variant of variants) {
+            if (candidates.length >= config.maxCandidates) return candidates
+            try {
+                const buffer = renderPngJsVariant(frame.buffer, variant)
+                if (!buffer?.length) continue
+                candidates.push({ ...frame, buffer, candidate: variant.name })
+            } catch (error) {
+                debugLog("pngjs preprocessing failed", {
+                    frame: frame.frameIndex,
+                    candidate: variant.name,
+                    error: shortError(error),
+                })
+            }
+        }
+    }
+    return candidates
+}
+
 function getTesseract() {
     if (tesseractLoadAttempted) return tesseractModule
     tesseractLoadAttempted = true
@@ -220,7 +411,7 @@ function pickFrameIndexes(pageCount, maxFrames) {
     return [...new Set(indexes)]
 }
 
-function execFileWithTimeout(command, args, timeoutMs) {
+function execFileWithTimeout(command, args, timeoutMs, missingCode = "ffmpeg_missing") {
     return new Promise((resolve, reject) => {
         execFile(command, args, {
             timeout: timeoutMs,
@@ -229,7 +420,7 @@ function execFileWithTimeout(command, args, timeoutMs) {
         }, (error, stdout, stderr) => {
             if (error) {
                 reject(makeOcrError(
-                    error.code === "ENOENT" ? "ffmpeg_missing" : "conversion_failed",
+                    error.code === "ENOENT" ? missingCode : "conversion_failed",
                     shortError(stderr || error)
                 ))
                 return
@@ -369,45 +560,51 @@ async function preprocessStickerCandidates(frameInput, options = {}) {
     const config = { ...getRuntimeConfig(), ...options }
     const frames = Array.isArray(frameInput) ? frameInput : frameInput?.frames || []
     if (!frames.length) return []
-    const sharp = getSharp(options)
-    if (!sharp) {
-        return frames.slice(0, config.maxCandidates).map(frame => ({
-            ...frame,
-            candidate: "frame-original",
-        }))
+
+    const candidates = []
+    const seenHashes = new Set()
+    const pushCandidate = candidate => {
+        if (!candidate?.buffer?.length || candidates.length >= config.maxCandidates) return
+        const hash = crypto.createHash("sha1").update(candidate.buffer).digest("hex")
+        if (seenHashes.has(hash)) return
+        seenHashes.add(hash)
+        candidates.push(candidate)
     }
 
-    const variants = [
-        { name: "original" },
-        { name: "white-upscale", background: "#ffffff", scale: 4, grayscale: true, normalize: true, sharpen: true },
-        { name: "black-upscale", background: "#000000", scale: 4, grayscale: true, normalize: true, sharpen: true },
-        { name: "white-threshold", background: "#ffffff", scale: 4, grayscale: true, normalize: true, sharpen: true, threshold: 155 },
-        { name: "white-threshold-high", background: "#ffffff", scale: 4, grayscale: true, normalize: true, sharpen: true, threshold: 190 },
-        { name: "black-inverted", background: "#000000", scale: 4, grayscale: true, normalize: true, sharpen: true, negate: true, threshold: 160 },
-        { name: "contrast", background: "#ffffff", scale: 4, grayscale: true, normalize: true, linear: [1.35, -18], sharpen: true },
-        { name: "trimmed", background: "#ffffff", scale: 4, grayscale: true, normalize: true, sharpen: true, trim: true },
-    ]
-    const candidates = []
+    // Pure-JS PNG preprocessing is the primary Termux-safe path. It avoids relying
+    // on optional native sharp binaries, which frequently fail to load on Android.
+    for (const candidate of buildPngJsCandidates(frames, config)) pushCandidate(candidate)
 
-    for (let variantIndex = 0; variantIndex < variants.length; variantIndex += 1) {
+    const sharp = getSharp(options)
+    if (sharp && candidates.length < config.maxCandidates) {
+        const variants = [
+            { name: "sharp-white-upscale", background: "#ffffff", scale: 5, grayscale: true, normalize: true, sharpen: true },
+            { name: "sharp-black-upscale", background: "#000000", scale: 5, grayscale: true, normalize: true, sharpen: true, negate: true },
+            { name: "sharp-white-threshold", background: "#ffffff", scale: 5, grayscale: true, normalize: true, sharpen: true, threshold: 150 },
+            { name: "sharp-white-threshold-high", background: "#ffffff", scale: 5, grayscale: true, normalize: true, sharpen: true, threshold: 195 },
+            { name: "sharp-trimmed", background: "#ffffff", scale: 5, grayscale: true, normalize: true, sharpen: true, trim: true },
+        ]
         for (const frame of frames) {
-            if (candidates.length >= config.maxCandidates) return candidates
-            try {
-                const rendered = await renderPreprocessVariant(frame, variants[variantIndex], sharp)
-                if (!rendered?.length) continue
-                candidates.push({
-                    ...frame,
-                    buffer: rendered,
-                    candidate: variants[variantIndex].name,
-                })
-            } catch (error) {
-                debugLog("preprocessing candidate failed", {
-                    candidate: variants[variantIndex].name,
-                    frame: frame.frameIndex,
-                    error: shortError(error),
-                })
+            for (const variant of variants) {
+                if (candidates.length >= config.maxCandidates) break
+                try {
+                    const rendered = await renderPreprocessVariant(frame, variant, sharp)
+                    pushCandidate({ ...frame, buffer: rendered, candidate: variant.name })
+                } catch (error) {
+                    debugLog("sharp preprocessing candidate failed", {
+                        candidate: variant.name,
+                        frame: frame.frameIndex,
+                        error: shortError(error),
+                    })
+                }
             }
         }
+    }
+
+    // Last-resort originals are still useful for already-clean PNG frames.
+    for (const frame of frames) {
+        if (candidates.length >= config.maxCandidates) break
+        pushCandidate({ ...frame, candidate: `${frame.source || "frame"}-original` })
     }
     return candidates
 }
@@ -592,6 +789,8 @@ async function recognizeCandidate(candidate, options = {}) {
         tessedit_pageseg_mode: psm,
         tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789|!.-",
         preserve_interword_spaces: "1",
+        user_defined_dpi: "300",
+        tessedit_do_invert: "1",
     })
     const result = await withTimeout(
         activeWorker.recognize(candidate.buffer),
@@ -603,6 +802,87 @@ async function recognizeCandidate(candidate, options = {}) {
         confidence: Number(result?.data?.confidence || 0) || 0,
         psm,
     }
+}
+
+
+function parseTesseractTsv(stdout) {
+    const words = []
+    const confidences = []
+    const lines = String(stdout || "").split(/\r?\n/)
+    for (let index = 1; index < lines.length; index += 1) {
+        const columns = lines[index].split("\t")
+        if (columns.length < 12) continue
+        const confidence = Number(columns[10])
+        const text = String(columns.slice(11).join("\t") || "").trim()
+        if (!text) continue
+        words.push(text)
+        if (Number.isFinite(confidence) && confidence >= 0) confidences.push(confidence)
+    }
+    return {
+        text: words.join(" ").replace(/\s+/g, " ").trim().slice(0, 300),
+        confidence: confidences.length ? Math.max(...confidences) : 0,
+    }
+}
+
+async function recognizeCandidateWithCli(candidate, options = {}) {
+    if (!candidate?.buffer?.length) throw makeOcrError("preprocessing_failed", "candidate kosong")
+    const config = { ...getRuntimeConfig(), ...(options.runtime || {}) }
+    if (!config.cliEnabled) throw makeOcrError("cli_disabled", "Tesseract CLI fallback nonaktif")
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "anti-toxic-tesseract-cli-"))
+    const inputPath = path.join(tempRoot, "candidate.png")
+    try {
+        fs.writeFileSync(inputPath, candidate.buffer)
+        const psm = String(options.psm || "8")
+        const result = await execFileWithTimeout(config.tesseractBin, [
+            inputPath,
+            "stdout",
+            "-l", "eng",
+            "--psm", psm,
+            "-c", "tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789|!.-",
+            "-c", "preserve_interword_spaces=1",
+            "tsv",
+        ], Math.min(config.cliTimeoutMs, Number(options.timeoutMs || config.cliTimeoutMs)), "tesseract_cli_missing")
+        const parsed = parseTesseractTsv(result.stdout)
+        return { ...parsed, psm, engine: "tesseract-cli" }
+    } finally {
+        try {
+            const resolved = path.resolve(tempRoot)
+            const base = path.resolve(os.tmpdir())
+            if (resolved.startsWith(base + path.sep)) fs.rmSync(resolved, { recursive: true, force: true })
+        } catch {}
+    }
+}
+
+function getRecognitionPlan(candidates, psmModes, maxPasses) {
+    const plan = []
+    const append = (psm, limit) => {
+        for (const candidate of candidates.slice(0, limit)) {
+            if (plan.length >= maxPasses) return
+            plan.push({ candidate, psm })
+        }
+    }
+    append(psmModes[0] || "8", Math.min(8, candidates.length))
+    append(psmModes[1] || "7", Math.min(4, candidates.length))
+    append(psmModes[2] || "11", Math.min(2, candidates.length))
+    return plan.slice(0, maxPasses)
+}
+
+function evaluateOcrObservation(observation, raw, normalized, nonAmbiguousCandidates, toxicWords, votes, config) {
+    const match = matchOcrCandidatesAgainstWordlist(normalized, toxicWords)
+    if (!match.matched) return { accepted: false, match }
+    const count = Number(votes.get(match.word) || 0) + 1
+    votes.set(match.word, count)
+    const confidence = Number(observation.confidence || 0)
+    const compactRaw = normalizeBasic(raw).replace(/[^\p{L}\p{N}|!]+/gu, "")
+    const letterLOnlyMatch = !nonAmbiguousCandidates.includes(match.word) && compactRaw.includes("l")
+    const exactRaw = compactRaw === match.word || makeConfusionVariant(compactRaw, false) === match.word
+    const shortWord = match.word.length <= 4
+    const accepted = letterLOnlyMatch
+        ? count >= 2
+        : shortWord && exactRaw
+            ? confidence >= config.exactShortConfidence || count >= 2
+            : confidence >= config.mediumConfidence || count >= 2
+    return { accepted, match, count, confidence, exactRaw, shortWord, letterLOnlyMatch }
 }
 
 function hashWords(words) {
@@ -740,6 +1020,7 @@ async function runScan(msg, options, initialKey) {
         passes: 0,
         animated: Boolean(stickerMessage?.isAnimated),
         engine: workerStatus,
+        engines: [],
         cacheHit: false,
     }
 
@@ -786,67 +1067,130 @@ async function runScan(msg, options, initialKey) {
 
         const votes = new Map()
         const psmModes = getPsmModes(options)
-        for (const candidate of candidates) {
-            for (const psm of psmModes) {
-                const remaining = config.timeoutMs - (Date.now() - startedAt)
-                if (remaining <= 500) throw makeOcrError("ocr_timeout", `OCR timeout setelah ${config.timeoutMs} ms`)
-                const observation = await recognizeCandidate(candidate, {
-                    ...options,
-                    psm,
-                    timeoutMs: remaining,
-                })
-                baseResult.passes += 1
-                const raw = String(observation.text || "").trim()
-                if (!raw) continue
-                if (!baseResult.rawTexts.includes(raw)) baseResult.rawTexts.push(raw.slice(0, 300))
-                const normalized = normalizeOcrCandidates(raw, { maxCandidates: config.maxCandidates * 3 })
-                const nonAmbiguousCandidates = normalizeOcrCandidates(raw, {
-                    maxCandidates: config.maxCandidates * 3,
-                    includeLetterLVariant: false,
-                })
-                for (const value of normalized) {
-                    if (!baseResult.normalizedCandidates.includes(value)) baseResult.normalizedCandidates.push(value)
-                }
-                const match = matchOcrCandidatesAgainstWordlist(normalized, toxicWords)
-                debugLog("OCR observation", {
-                    frame: candidate.frameIndex,
-                    candidate: candidate.candidate,
-                    psm,
-                    confidence: Math.round(observation.confidence),
-                    raw: raw.slice(0, 80),
-                    normalized: match.candidate || normalized.slice(0, 4).join(","),
-                })
-                if (!match.matched) continue
+        const plan = getRecognitionPlan(candidates, psmModes, config.maxPasses)
+        let jsEngineError = null
+        let cliEngineError = null
 
-                const voteKey = match.word
-                const count = Number(votes.get(voteKey) || 0) + 1
-                votes.set(voteKey, count)
-                const confidence = Number(observation.confidence || 0)
-                const letterLOnlyMatch = !nonAmbiguousCandidates.includes(match.word)
-                    && normalizeBasic(raw).includes("l")
-                const accepted = letterLOnlyMatch
-                    ? count >= 2
-                    : confidence >= config.mediumConfidence || count >= 2
-                if (!accepted) continue
-
-                const result = {
-                    ...baseResult,
-                    status: "toxic",
-                    result: "toxic",
-                    reason: "toxic",
-                    matchedWord: match.word,
-                    matchedCandidate: match.candidate,
-                    confidence,
-                    engine: workerStatus,
-                    durationMs: Date.now() - startedAt,
-                }
-                debugLog(`normalized=${match.candidate}`)
-                debugLog(`match=${match.word}`)
-                debugLog("handled=true", { durationMs: result.durationMs })
-                rememberCache(cacheKey, result)
-                updateLastScan(result)
-                return result
+        const processObservation = (observation, candidate, psm, engineName) => {
+            baseResult.passes += 1
+            if (!baseResult.engines.includes(engineName)) baseResult.engines.push(engineName)
+            const raw = String(observation?.text || "").trim()
+            if (!raw) return null
+            if (!baseResult.rawTexts.includes(raw)) baseResult.rawTexts.push(raw.slice(0, 300))
+            const normalized = normalizeOcrCandidates(raw, { maxCandidates: config.maxCandidates * 3 })
+            const nonAmbiguousCandidates = normalizeOcrCandidates(raw, {
+                maxCandidates: config.maxCandidates * 3,
+                includeLetterLVariant: false,
+            })
+            for (const value of normalized) {
+                if (!baseResult.normalizedCandidates.includes(value)) baseResult.normalizedCandidates.push(value)
             }
+            const decision = evaluateOcrObservation(
+                observation,
+                raw,
+                normalized,
+                nonAmbiguousCandidates,
+                toxicWords,
+                votes,
+                config
+            )
+            debugLog("OCR observation", {
+                engine: engineName,
+                frame: candidate.frameIndex,
+                candidate: candidate.candidate,
+                psm,
+                confidence: Math.round(Number(observation?.confidence || 0)),
+                raw: raw.slice(0, 80),
+                normalized: decision.match?.candidate || normalized.slice(0, 4).join(","),
+                votes: decision.count,
+                accepted: decision.accepted,
+            })
+            if (!decision.accepted) return null
+            return {
+                ...baseResult,
+                status: "toxic",
+                result: "toxic",
+                reason: "toxic",
+                matchedWord: decision.match.word,
+                matchedCandidate: decision.match.candidate,
+                confidence: decision.confidence,
+                engine: engineName,
+                engines: [...baseResult.engines],
+                durationMs: Date.now() - startedAt,
+            }
+        }
+
+        // Primary engine: reusable Tesseract.js worker. The pass plan is bounded
+        // and prioritises SINGLE_WORD before slower line/sparse modes.
+        for (const step of plan) {
+            const remaining = config.timeoutMs - (Date.now() - startedAt)
+            if (remaining <= 750) break
+            try {
+                const observation = await recognizeCandidate(step.candidate, {
+                    ...options,
+                    psm: step.psm,
+                    timeoutMs: Math.min(remaining, 9000),
+                })
+                const matched = processObservation(observation, step.candidate, step.psm, "tesseract.js")
+                if (matched) {
+                    debugLog(`normalized=${matched.matchedCandidate}`)
+                    debugLog(`match=${matched.matchedWord}`)
+                    debugLog("handled=true", { durationMs: matched.durationMs, engine: matched.engine })
+                    rememberCache(cacheKey, matched)
+                    updateLastScan(matched)
+                    return matched
+                }
+            } catch (error) {
+                jsEngineError = error
+                debugLog("tesseract.js pass failed", {
+                    candidate: step.candidate.candidate,
+                    psm: step.psm,
+                    error: shortError(error),
+                })
+                if (["worker_init_failed", "ocr_timeout"].includes(error?.code)) break
+            }
+        }
+
+        // Secondary engine: native Tesseract CLI when installed in Termux.
+        // It is deliberately bounded to the strongest candidates and never required.
+        if (config.cliEnabled) {
+            const cliPlan = getRecognitionPlan(candidates.slice(0, 4), psmModes.slice(0, 2), Math.min(6, config.maxPasses))
+            for (const step of cliPlan) {
+                const remaining = config.timeoutMs - (Date.now() - startedAt)
+                if (remaining <= 1000) break
+                try {
+                    const observation = await recognizeCandidateWithCli(step.candidate, {
+                        ...options,
+                        runtime: config,
+                        psm: step.psm,
+                        timeoutMs: Math.min(remaining, config.cliTimeoutMs),
+                    })
+                    const matched = processObservation(observation, step.candidate, step.psm, "tesseract-cli")
+                    if (matched) {
+                        debugLog(`normalized=${matched.matchedCandidate}`)
+                        debugLog(`match=${matched.matchedWord}`)
+                        debugLog("handled=true", { durationMs: matched.durationMs, engine: matched.engine })
+                        rememberCache(cacheKey, matched)
+                        updateLastScan(matched)
+                        return matched
+                    }
+                } catch (error) {
+                    cliEngineError = error
+                    debugLog("tesseract CLI pass failed", {
+                        candidate: step.candidate.candidate,
+                        psm: step.psm,
+                        error: shortError(error),
+                    })
+                    if (["tesseract_cli_missing", "ENOENT"].includes(error?.code) || /ENOENT|not found/i.test(shortError(error))) break
+                }
+            }
+        }
+
+        if (!baseResult.rawTexts.length && jsEngineError && cliEngineError) {
+            throw makeOcrError(
+                jsEngineError.code || cliEngineError.code || "ocr_error",
+                `Tesseract.js: ${shortError(jsEngineError)}; CLI: ${shortError(cliEngineError)}`
+            )
         }
 
         const result = {
@@ -854,7 +1198,8 @@ async function runScan(msg, options, initialKey) {
             status: "clean",
             result: "clean",
             reason: baseResult.rawTexts.length ? "clean" : "ocr_empty",
-            engine: workerStatus,
+            engine: baseResult.engines.length ? baseResult.engines.join("+") : workerStatus,
+            engines: [...baseResult.engines],
             durationMs: Date.now() - startedAt,
         }
         rememberCache(cacheKey, result)
@@ -930,6 +1275,31 @@ function probeFfmpeg(force = false) {
     return ffmpegProbe
 }
 
+
+function probeTesseractCli(force = false) {
+    if (tesseractCliProbe && !force) return tesseractCliProbe
+    const config = getRuntimeConfig()
+    if (!config.cliEnabled) {
+        tesseractCliProbe = { ready: false, detail: "OFF" }
+        return tesseractCliProbe
+    }
+    try {
+        const result = spawnSync(config.tesseractBin, ["--version"], {
+            encoding: "utf8",
+            timeout: 3000,
+            windowsHide: true,
+            stdio: ["ignore", "pipe", "pipe"],
+        })
+        tesseractCliProbe = {
+            ready: result.status === 0,
+            detail: result.status === 0 ? "READY" : "NOT FOUND",
+        }
+    } catch {
+        tesseractCliProbe = { ready: false, detail: "NOT FOUND" }
+    }
+    return tesseractCliProbe
+}
+
 function dependencyResolvable(name) {
     try {
         require.resolve(name)
@@ -944,12 +1314,16 @@ function getAntiToxicStickerOcrHealth(options = {}) {
     if (options.probeDependencies) {
         getSharp(options)
         getTesseract()
+        getPngJs()
         probeFfmpeg()
+        probeTesseractCli()
     }
     const tesseractInstalled = dependencyResolvable("tesseract.js") && !tesseractLoadError
     const sharpInstalled = dependencyResolvable("sharp")
+    const pngjsInstalled = dependencyResolvable("pngjs") && !pngjsLoadError
     const ffmpeg = ffmpegProbe || { ready: false, detail: "NOT CHECKED" }
-    const imageEngineReady = Boolean(sharpModule || (!sharpLoadAttempted && sharpInstalled) || ffmpeg.ready)
+    const cli = tesseractCliProbe || { ready: false, detail: "NOT CHECKED" }
+    const imageEngineReady = Boolean(pngjsInstalled || sharpModule || (!sharpLoadAttempted && sharpInstalled) || ffmpeg.ready)
     const words = Array.isArray(options.toxicWords) ? options.toxicWords : []
     const normalizedWords = words.map(normalizeWordlistEntry)
     const staticStatus = config.enabled && tesseractInstalled && imageEngineReady ? "READY" : "DEGRADED"
@@ -967,6 +1341,8 @@ function getAntiToxicStickerOcrHealth(options = {}) {
         worker: workerStatus,
         workerError,
         tesseract: tesseractInstalled ? (workerStatus === "READY" ? "READY" : "LAZY / NOT INITIALIZED") : "ERROR",
+        tesseractCli: cli.detail,
+        pngjs: pngjsInstalled ? "READY" : `ERROR${pngjsLoadError ? ` (${pngjsLoadError})` : ""}`,
         sharp: sharpModule ? "READY" : sharpLoadAttempted ? `FALLBACK${sharpLoadError ? ` (${sharpLoadError})` : ""}` : sharpInstalled ? "LAZY" : "FALLBACK",
         ffmpeg: ffmpeg.detail,
         staticSticker: staticStatus,
@@ -982,7 +1358,9 @@ function getAntiToxicStickerOcrHealth(options = {}) {
         maxBytes: config.maxBytes,
         maxFrames: config.maxFrames,
         maxCandidates: config.maxCandidates,
+        maxPasses: config.maxPasses,
         timeoutMs: config.timeoutMs,
+        cliEnabled: config.cliEnabled,
         debug: config.debug,
         lastScan: { ...lastScan },
     }
@@ -1015,6 +1393,8 @@ function getStatusText(health) {
         `Scope: ${health.scope}`,
         `Engine: ${health.engine}`,
         `Tesseract.js: ${health.tesseract}`,
+        `Tesseract CLI: ${health.tesseractCli}`,
+        `PNGJS Preprocess: ${health.pngjs}`,
         `Sharp: ${health.sharp}`,
         `FFmpeg: ${health.ffmpeg}`,
         `Static Sticker: ${health.staticSticker}`,
@@ -1032,7 +1412,9 @@ function getStatusText(health) {
         `- Max bytes: ${health.maxBytes}`,
         `- Max frames: ${health.maxFrames}`,
         `- Max candidates: ${health.maxCandidates}`,
+        `- Max OCR passes: ${health.maxPasses}`,
         `- Timeout: ${health.timeoutMs} ms`,
+        `- CLI fallback: ${health.cliEnabled ? "ON" : "OFF"}`,
         `- Debug: ${health.debug ? "ON" : "OFF"}`,
         `- Queue: ${health.queue} waiting / ${health.active} active`,
         "",
