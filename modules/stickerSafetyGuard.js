@@ -4,7 +4,6 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const { execFile } = require("child_process");
-const { PNG } = require("pngjs");
 
 let tf = null;
 let nsfwjs = null;
@@ -12,6 +11,8 @@ let sharp = null;
 let sharpLoadError = null;
 let sharpLoadAttempted = false;
 let downloadContentFromMessage = null;
+let pngjs = null;
+let tfBackendName = "unknown";
 
 const DATA_DIR = path.join(__dirname, "..", "data");
 const STATE_PATH = path.join(DATA_DIR, "stickerSafetyGuard.json");
@@ -43,6 +44,7 @@ const recentMessageIds = new Map();
 const recentStickerHashes = new Map();
 const MESSAGE_DEDUPE_TTL_MS = 2 * 60 * 1000;
 const HASH_DEDUPE_TTL_MS = 30 * 1000;
+const NSFW_PIPELINE_VERSION = "sticker-nsfw-v2";
 
 let stateCache = null;
 let wordCache = null;
@@ -58,6 +60,16 @@ let nsfwModelPromise = null;
 let nsfwModel = null;
 let nsfwStatus = "MISSING";
 let nsfwDetail = "";
+let nsfwRuntimeStats = {
+    lastScanAt: 0,
+    lastResult: "never",
+    lastCategory: null,
+    lastConfidence: 0,
+    lastFrames: 0,
+    lastRegions: 0,
+    lastDurationMs: 0,
+    lastReason: "",
+};
 
 let activeJobs = 0;
 const queue = [];
@@ -77,28 +89,42 @@ function parseNumber(value, fallback) {
 }
 
 function getRuntimeConfig() {
+    const pornThreshold = clampProbability(process.env.STICKER_NSFW_PORN_THRESHOLD, 0.72);
+    const hentaiThreshold = clampProbability(process.env.STICKER_NSFW_HENTAI_THRESHOLD, 0.72);
+    const sexyThreshold = clampProbability(process.env.STICKER_NSFW_SEXY_THRESHOLD, 0.86);
     return {
-        maxFrames: Math.max(1, Math.min(10, Math.floor(parseNumber(process.env.STICKER_SAFETY_MAX_FRAMES, 5)))),
+        maxFrames: Math.max(1, Math.min(12, Math.floor(parseNumber(process.env.STICKER_SAFETY_MAX_FRAMES, 7)))),
         maxFileBytes: Math.max(1, parseNumber(process.env.STICKER_SAFETY_MAX_FILE_MB, 8) * 1024 * 1024),
-        ffmpegTimeoutMs: Math.max(1000, parseNumber(process.env.STICKER_SAFETY_FFMPEG_TIMEOUT_MS, 20000)),
+        ffmpegTimeoutMs: Math.max(1000, parseNumber(process.env.STICKER_SAFETY_FFMPEG_TIMEOUT_MS, 25000)),
         ffmpegBin: String(process.env.FFMPEG_BIN || process.env.FFMPEG_PATH || "ffmpeg").trim() || "ffmpeg",
+        ffprobeBin: String(process.env.FFPROBE_BIN || "ffprobe").trim() || "ffprobe",
         ocrScale: Math.max(1, Math.min(5, Math.floor(parseNumber(process.env.STICKER_OCR_SCALE, 3)))),
         ocrVariants: Math.max(1, Math.min(3, Math.floor(parseNumber(process.env.STICKER_OCR_VARIANTS, 2)))),
         ocrLangs: String(process.env.STICKER_OCR_LANGS || "ind+eng").trim() || "eng",
-        nsfwModelName: normalizeModelName(process.env.STICKER_NSFW_MODEL || "MobileNetV2"),
-        nsfwPornThreshold: parseNumber(process.env.STICKER_NSFW_PORN_THRESHOLD, 0.75),
-        nsfwHentaiThreshold: parseNumber(process.env.STICKER_NSFW_HENTAI_THRESHOLD, 0.75),
-        nsfwSexyThreshold: parseNumber(process.env.STICKER_NSFW_SEXY_THRESHOLD, 0.97),
-        nsfwHardThreshold: parseNumber(process.env.STICKER_NSFW_HARD_THRESHOLD, 0.92),
+        nsfwModelName: normalizeModelName(process.env.STICKER_NSFW_MODEL || "MobileNetV2Mid"),
+        nsfwPornThreshold: pornThreshold,
+        nsfwHentaiThreshold: hentaiThreshold,
+        nsfwSexyThreshold: sexyThreshold,
+        nsfwHardThreshold: clampProbability(process.env.STICKER_NSFW_HARD_THRESHOLD, 0.92),
+        nsfwCombinedThreshold: clampProbability(process.env.STICKER_NSFW_COMBINED_THRESHOLD, 0.82),
+        nsfwTopMeanThreshold: clampProbability(process.env.STICKER_NSFW_TOP_MEAN_THRESHOLD, 0.70),
+        nsfwCropTriggerThreshold: clampProbability(process.env.STICKER_NSFW_CROP_TRIGGER_THRESHOLD, 0.28),
+        nsfwMaxRegions: Math.max(1, Math.min(5, Math.floor(parseNumber(process.env.STICKER_NSFW_MAX_REGIONS, 4)))),
+        nsfwCropFrameCount: Math.max(1, Math.min(3, Math.floor(parseNumber(process.env.STICKER_NSFW_CROP_FRAME_COUNT, 2)))),
         nsfwRequireMultipleFrames: parseBool(process.env.STICKER_NSFW_REQUIRE_MULTIPLE_FRAMES, true),
         action: String(process.env.STICKER_SAFETY_ACTION || "warn").trim().toLowerCase(),
         cacheTtlMs: Math.max(1, parseNumber(process.env.STICKER_SAFETY_CACHE_TTL_HOURS, 168)) * 60 * 60 * 1000,
         cacheMax: Math.max(1, Math.floor(parseNumber(process.env.STICKER_SAFETY_CACHE_MAX, 1000))),
         concurrency: Math.max(1, Math.floor(parseNumber(process.env.STICKER_SAFETY_CONCURRENCY, 1))),
         queueMax: Math.max(0, Math.floor(parseNumber(process.env.STICKER_SAFETY_QUEUE_MAX, 20))),
-        timeoutMs: Math.max(5000, parseNumber(process.env.STICKER_SAFETY_TIMEOUT_MS, 45000)),
+        timeoutMs: Math.max(10000, parseNumber(process.env.STICKER_SAFETY_TIMEOUT_MS, 90000)),
         legacyFallback: parseBool(process.env.STICKER_SAFETY_LEGACY_FALLBACK, false),
     };
+}
+
+function clampProbability(value, fallback) {
+    const number = parseNumber(value, fallback);
+    return Math.max(0, Math.min(1, number));
 }
 
 function normalizeModelName(value) {
@@ -108,8 +134,21 @@ function normalizeModelName(value) {
 }
 
 function getTensorflow() {
-    if (!tf) tf = require("@tensorflow/tfjs");
+    if (tf) return tf;
+    try {
+        tf = require("@tensorflow/tfjs-node");
+        tfBackendName = "tensorflow-node";
+    } catch {
+        tf = require("@tensorflow/tfjs");
+        tfBackendName = "tensorflow-js";
+    }
+    if (typeof tf.enableProdMode === "function") tf.enableProdMode();
     return tf;
+}
+
+function getPngJs() {
+    if (!pngjs) pngjs = require("pngjs");
+    return pngjs;
 }
 
 function getNsfwJs() {
@@ -466,6 +505,53 @@ async function fileExists(filePath) {
     }
 }
 
+function buildEvenSampleTimestamps(durationSeconds, maxFrames) {
+    const duration = Number(durationSeconds);
+    const count = Math.max(1, Math.floor(Number(maxFrames) || 1));
+    if (!Number.isFinite(duration) || duration <= 0 || count === 1) return [0];
+    const safeEnd = Math.max(0, duration - Math.min(0.04, duration / 20));
+    return Array.from({ length: count }, (_, index) => {
+        const ratio = count === 1 ? 0 : index / (count - 1);
+        return Number((safeEnd * ratio).toFixed(3));
+    });
+}
+
+async function probeMediaDuration(inputPath, config = getRuntimeConfig()) {
+    try {
+        const { stdout } = await execFileWithTimeout(config.ffprobeBin, [
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            inputPath,
+        ], { timeoutMs: Math.min(config.ffmpegTimeoutMs, 12000) });
+        const duration = Number(String(stdout || "").trim());
+        return Number.isFinite(duration) && duration > 0 ? duration : 0;
+    } catch {
+        return 0;
+    }
+}
+
+async function extractFrameAtTimestamp(inputPath, outputPath, timestamp, config) {
+    await execFileWithTimeout(config.ffmpegBin, [
+        "-y", "-hide_banner", "-loglevel", "error",
+        "-ss", String(Math.max(0, Number(timestamp) || 0)),
+        "-i", inputPath,
+        "-frames:v", "1",
+        "-vf", "scale='min(640,iw)':-1:flags=lanczos",
+        outputPath,
+    ], { timeoutMs: config.ffmpegTimeoutMs });
+}
+
+async function extractSequentialFrames(inputPath, outputPattern, maxFrames, config) {
+    await execFileWithTimeout(config.ffmpegBin, [
+        "-y", "-hide_banner", "-loglevel", "error",
+        "-i", inputPath,
+        "-vf", "fps=4,scale='min(640,iw)':-1:flags=lanczos",
+        "-frames:v", String(maxFrames),
+        outputPattern,
+    ], { timeoutMs: config.ffmpegTimeoutMs });
+}
+
 async function extractStickerFrames(buffer, stickerMessage = {}, options = {}) {
     ensureDirs();
     const config = getRuntimeConfig();
@@ -476,21 +562,23 @@ async function extractStickerFrames(buffer, stickerMessage = {}, options = {}) {
     await fs.promises.writeFile(inputPath, buffer);
 
     const animated = Boolean(stickerMessage?.isAnimated);
-    const frames = [];
+    let duration = 0;
+    let sampleTimestamps = [0];
     try {
-        const vf = animated
-            ? `fps=${Math.max(1, Math.ceil(maxFrames / 2))},scale='min(512,iw)':-1:flags=lanczos`
-            : "scale='min(512,iw)':-1:flags=lanczos";
-        const args = [
-            "-y",
-            "-hide_banner",
-            "-loglevel", "error",
-            "-i", inputPath,
-            "-vf", vf,
-            "-frames:v", String(maxFrames),
-            outputPattern,
-        ];
-        await execFileWithTimeout(config.ffmpegBin, args, { timeoutMs: config.ffmpegTimeoutMs });
+        if (animated) {
+            duration = await probeMediaDuration(inputPath, config);
+            sampleTimestamps = buildEvenSampleTimestamps(duration, maxFrames);
+            if (duration > 0) {
+                for (let index = 0; index < sampleTimestamps.length; index += 1) {
+                    const outputPath = path.join(tempDir, `frame_${String(index + 1).padStart(3, "0")}.png`);
+                    await extractFrameAtTimestamp(inputPath, outputPath, sampleTimestamps[index], config);
+                }
+            } else {
+                await extractSequentialFrames(inputPath, outputPattern, maxFrames, config);
+            }
+        } else {
+            await extractFrameAtTimestamp(inputPath, path.join(tempDir, "frame_001.png"), 0, config);
+        }
     } catch (error) {
         const sharpRuntime = getSharp();
         if (!sharpRuntime) throw new Error(`ffmpeg gagal ekstrak frame dan sharp tidak tersedia: ${shortError(error)}`);
@@ -499,6 +587,8 @@ async function extractStickerFrames(buffer, stickerMessage = {}, options = {}) {
             .flatten({ background: "#ffffff" })
             .png()
             .toFile(fallbackPath);
+        duration = 0;
+        sampleTimestamps = [0];
     }
 
     const files = (await fs.promises.readdir(tempDir))
@@ -506,12 +596,14 @@ async function extractStickerFrames(buffer, stickerMessage = {}, options = {}) {
         .sort()
         .slice(0, maxFrames);
 
+    const frames = [];
     for (let i = 0; i < files.length; i += 1) {
         const filePath = path.join(tempDir, files[i]);
         frames.push({
             index: i,
             path: filePath,
             buffer: await fs.promises.readFile(filePath),
+            timestamp: sampleTimestamps[i] ?? null,
         });
     }
 
@@ -520,6 +612,8 @@ async function extractStickerFrames(buffer, stickerMessage = {}, options = {}) {
     return {
         type: animated ? "animated" : "static",
         animated,
+        duration,
+        sampleTimestamps,
         tempDir,
         frames,
     };
@@ -796,13 +890,15 @@ async function getNsfwModel() {
             const tfRuntime = getTensorflow();
             const nsfwRuntime = getNsfwJs();
             await tfRuntime.ready();
-            const size = config.nsfwModelName === "MobileNetV2Mid" ? 299 : 224;
-            nsfwModel = await nsfwRuntime.load(undefined, { size });
+            nsfwModel = await nsfwRuntime.load(config.nsfwModelName);
             nsfwStatus = "READY";
+            nsfwDetail = `${config.nsfwModelName} / ${tfBackendName}`;
             return nsfwModel;
         } catch (error) {
             nsfwStatus = "ERROR";
             nsfwDetail = shortError(error);
+            nsfwModel = null;
+            nsfwModelPromise = null;
             console.log(`[STICKER SAFETY] NSFW model unavailable: ${nsfwDetail}`);
             throw error;
         }
@@ -810,9 +906,13 @@ async function getNsfwModel() {
     return nsfwModelPromise;
 }
 
+function getNsfwInputSize() {
+    return getRuntimeConfig().nsfwModelName === "MobileNetV2Mid" ? 299 : 224;
+}
+
 async function imageBufferToTensor(imageBuffer) {
     const tfRuntime = getTensorflow();
-    const size = getRuntimeConfig().nsfwModelName === "MobileNetV2Mid" ? 299 : 224;
+    const size = getNsfwInputSize();
     const sharpRuntime = getSharp();
     if (sharpRuntime) {
         const raw = await sharpRuntime(imageBuffer)
@@ -824,6 +924,7 @@ async function imageBufferToTensor(imageBuffer) {
         return tfRuntime.tensor3d(new Uint8Array(raw.data), [raw.info.height, raw.info.width, raw.info.channels], "int32");
     }
 
+    const { PNG } = getPngJs();
     const png = PNG.sync.read(imageBuffer);
     const rgb = new Uint8Array(png.width * png.height * 3);
     for (let i = 0, j = 0; i < png.data.length; i += 4, j += 3) {
@@ -839,6 +940,39 @@ async function imageBufferToTensor(imageBuffer) {
     return resized;
 }
 
+function cropPngBuffer(imageBuffer, crop) {
+    const { PNG } = getPngJs();
+    const source = PNG.sync.read(imageBuffer);
+    const left = Math.max(0, Math.min(source.width - 1, Math.floor(crop.left * source.width)));
+    const top = Math.max(0, Math.min(source.height - 1, Math.floor(crop.top * source.height)));
+    const right = Math.max(left + 1, Math.min(source.width, Math.ceil(crop.right * source.width)));
+    const bottom = Math.max(top + 1, Math.min(source.height, Math.ceil(crop.bottom * source.height)));
+    const width = right - left;
+    const height = bottom - top;
+    const output = new PNG({ width, height });
+    PNG.bitblt(source, output, left, top, width, height, 0, 0);
+    return PNG.sync.write(output);
+}
+
+function buildNsfwRegions(frame, maxRegions = getRuntimeConfig().nsfwMaxRegions) {
+    const buffer = frame?.buffer || frame;
+    if (!Buffer.isBuffer(buffer)) return [];
+    const definitions = [
+        { name: "center", left: 0.10, top: 0.10, right: 0.90, bottom: 0.90 },
+        { name: "top", left: 0.00, top: 0.00, right: 1.00, bottom: 0.62 },
+        { name: "bottom", left: 0.00, top: 0.38, right: 1.00, bottom: 1.00 },
+        { name: "left", left: 0.00, top: 0.00, right: 0.62, bottom: 1.00 },
+        { name: "right", left: 0.38, top: 0.00, right: 1.00, bottom: 1.00 },
+    ].slice(0, Math.max(0, Number(maxRegions) || 0));
+    const regions = [];
+    for (const definition of definitions) {
+        try {
+            regions.push({ name: definition.name, buffer: cropPngBuffer(buffer, definition) });
+        } catch {}
+    }
+    return regions;
+}
+
 function predictionsToMap(predictions = []) {
     const map = {};
     for (const name of CATEGORY_NAMES) map[name] = 0;
@@ -851,14 +985,16 @@ function predictionsToMap(predictions = []) {
     return map;
 }
 
-async function classifyNsfwFrame(frame, frameIndex = 0) {
+async function classifyNsfwFrame(frame, frameIndex = 0, region = "full") {
     let tensor = null;
     try {
         const model = await getNsfwModel();
-        tensor = await imageBufferToTensor(frame.buffer || frame);
-        const predictions = await model.classify(tensor);
+        tensor = await imageBufferToTensor(frame?.buffer || frame);
+        const predictions = await model.classify(tensor, 5);
         return {
             frameIndex,
+            region,
+            timestamp: frame?.timestamp ?? null,
             predictions: predictionsToMap(predictions),
             raw: predictions,
         };
@@ -867,103 +1003,215 @@ async function classifyNsfwFrame(frame, frameIndex = 0) {
     }
 }
 
-function maxByCategory(frameResults, category) {
-    let max = 0;
-    let frameIndex = 0;
+function getUnsafeScore(predictions = {}) {
+    const porn = Number(predictions.Porn || 0);
+    const hentai = Number(predictions.Hentai || 0);
+    const sexy = Number(predictions.Sexy || 0);
+    return Math.min(1, porn + hentai + (sexy * 0.55));
+}
+
+function maxByScore(frameResults, scoreFn) {
+    let best = null;
     for (const result of frameResults || []) {
-        const score = Number(result?.predictions?.[category] || 0);
-        if (score > max) {
-            max = score;
-            frameIndex = Number(result?.frameIndex || 0);
-        }
+        const score = Number(scoreFn(result) || 0);
+        if (!best || score > best.score) best = { score, result };
     }
-    return { score: max, frameIndex };
+    return best || { score: 0, result: null };
+}
+
+function maxByCategory(frameResults, category) {
+    return maxByScore(frameResults, result => Number(result?.predictions?.[category] || 0));
+}
+
+function countDistinctFrameHits(frameResults, predicate) {
+    return new Set((frameResults || []).filter(predicate).map(item => Number(item.frameIndex || 0))).size;
+}
+
+function topMean(frameResults, scoreFn, count = 2) {
+    const byFrame = new Map();
+    for (const item of frameResults || []) {
+        const frameIndex = Number(item.frameIndex || 0);
+        const score = Number(scoreFn(item) || 0);
+        byFrame.set(frameIndex, Math.max(byFrame.get(frameIndex) || 0, score));
+    }
+    const scores = [...byFrame.values()].sort((a, b) => b - a).slice(0, Math.max(1, count));
+    return scores.length ? scores.reduce((sum, value) => sum + value, 0) / scores.length : 0;
+}
+
+function buildNsfwDecision(category, evidence, reason) {
+    return {
+        violation: true,
+        category,
+        confidence: Number(evidence?.score || 0),
+        frameIndex: Number(evidence?.result?.frameIndex || 0),
+        region: evidence?.result?.region || "full",
+        predictions: evidence?.result?.predictions || {},
+        reason,
+    };
 }
 
 function evaluateNsfwPredictions(frameResults = [], options = {}) {
     const config = getRuntimeConfig();
-    const frameCount = frameResults.length;
-    const isStatic = Boolean(options.isStatic || frameCount <= 1);
+    const distinctFrames = new Set((frameResults || []).map(item => Number(item.frameIndex || 0))).size;
+    const isStatic = Boolean(options.isStatic || distinctFrames <= 1);
     const pornMax = maxByCategory(frameResults, "Porn");
     const hentaiMax = maxByCategory(frameResults, "Hentai");
     const sexyMax = maxByCategory(frameResults, "Sexy");
-    const pornHits = frameResults.filter(item => Number(item?.predictions?.Porn || 0) >= config.nsfwPornThreshold).length;
-    const hentaiHits = frameResults.filter(item => Number(item?.predictions?.Hentai || 0) >= config.nsfwHentaiThreshold).length;
-    const pornHentaiHits = frameResults.filter(item => (
+    const combinedMax = maxByScore(frameResults, item => (
         Number(item?.predictions?.Porn || 0) + Number(item?.predictions?.Hentai || 0)
-    ) >= 0.90).length;
-    const sexyHits = frameResults.filter(item => Number(item?.predictions?.Sexy || 0) >= config.nsfwSexyThreshold).length;
+    ));
 
-    if (pornMax.score >= config.nsfwHardThreshold || (!isStatic && (pornHits >= 2 || pornHentaiHits >= 2))) {
-        return {
-            violation: true,
-            category: "porn",
-            confidence: pornMax.score,
-            frameIndex: pornMax.frameIndex,
-            predictions: frameResults[pornMax.frameIndex]?.predictions || {},
-        };
+    const pornHits = countDistinctFrameHits(frameResults, item => Number(item?.predictions?.Porn || 0) >= config.nsfwPornThreshold);
+    const hentaiHits = countDistinctFrameHits(frameResults, item => Number(item?.predictions?.Hentai || 0) >= config.nsfwHentaiThreshold);
+    const sexyHits = countDistinctFrameHits(frameResults, item => Number(item?.predictions?.Sexy || 0) >= config.nsfwSexyThreshold);
+    const combinedHits = countDistinctFrameHits(frameResults, item => (
+        Number(item?.predictions?.Porn || 0) + Number(item?.predictions?.Hentai || 0)
+    ) >= config.nsfwCombinedThreshold);
+
+    const pornMean = topMean(frameResults, item => Number(item?.predictions?.Porn || 0), 2);
+    const hentaiMean = topMean(frameResults, item => Number(item?.predictions?.Hentai || 0), 2);
+    const combinedMean = topMean(frameResults, item => (
+        Number(item?.predictions?.Porn || 0) + Number(item?.predictions?.Hentai || 0)
+    ), 2);
+
+    if (pornMax.score >= config.nsfwHardThreshold) return buildNsfwDecision("porn", pornMax, "porn-hard");
+    if (hentaiMax.score >= config.nsfwHardThreshold) return buildNsfwDecision("hentai", hentaiMax, "hentai-hard");
+
+    if (isStatic) {
+        if (pornMax.score >= config.nsfwPornThreshold) return buildNsfwDecision("porn", pornMax, "porn-static-threshold");
+        if (hentaiMax.score >= config.nsfwHentaiThreshold) return buildNsfwDecision("hentai", hentaiMax, "hentai-static-threshold");
+        if (combinedMax.score >= config.nsfwCombinedThreshold) return buildNsfwDecision("explicit", combinedMax, "combined-static-threshold");
+        if (sexyMax.score >= config.nsfwSexyThreshold) return buildNsfwDecision("nudity", sexyMax, "sexy-static-threshold");
+    } else {
+        if (pornHits >= 2 || pornMean >= config.nsfwTopMeanThreshold) return buildNsfwDecision("porn", pornMax, "porn-temporal-consensus");
+        if (hentaiHits >= 2 || hentaiMean >= config.nsfwTopMeanThreshold) return buildNsfwDecision("hentai", hentaiMax, "hentai-temporal-consensus");
+        if (combinedHits >= 2 || combinedMean >= config.nsfwCombinedThreshold) return buildNsfwDecision("explicit", combinedMax, "combined-temporal-consensus");
+        if ((!config.nsfwRequireMultipleFrames || sexyHits >= 2) && sexyMax.score >= config.nsfwSexyThreshold) {
+            return buildNsfwDecision("nudity", sexyMax, "sexy-temporal-consensus");
+        }
     }
 
-    if (hentaiMax.score >= config.nsfwHardThreshold || (!isStatic && hentaiHits >= 2)) {
-        return {
-            violation: true,
-            category: "hentai",
-            confidence: hentaiMax.score,
-            frameIndex: hentaiMax.frameIndex,
-            predictions: frameResults[hentaiMax.frameIndex]?.predictions || {},
-        };
-    }
-
-    if (!isStatic && (!config.nsfwRequireMultipleFrames || sexyHits >= 2) && sexyMax.score >= config.nsfwSexyThreshold) {
-        return {
-            violation: true,
-            category: "suggestive",
-            confidence: sexyMax.score,
-            frameIndex: sexyMax.frameIndex,
-            predictions: frameResults[sexyMax.frameIndex]?.predictions || {},
-        };
-    }
-
-    const confidence = Math.max(pornMax.score, hentaiMax.score, sexyMax.score);
+    const confidence = Math.max(pornMax.score, hentaiMax.score, sexyMax.score, combinedMax.score);
+    const best = [pornMax, hentaiMax, sexyMax, combinedMax].sort((a, b) => b.score - a.score)[0];
     return {
         violation: false,
         category: null,
         confidence,
-        frameIndex: 0,
-        predictions: frameResults[0]?.predictions || {},
+        frameIndex: Number(best?.result?.frameIndex || 0),
+        region: best?.result?.region || "full",
+        predictions: best?.result?.predictions || {},
+        reason: "below-threshold",
     };
 }
 
+function rankSuspiciousFrames(frameResults = []) {
+    const byFrame = new Map();
+    for (const item of frameResults) {
+        const score = getUnsafeScore(item?.predictions || {});
+        const frameIndex = Number(item.frameIndex || 0);
+        if (!byFrame.has(frameIndex) || score > byFrame.get(frameIndex).score) {
+            byFrame.set(frameIndex, { frameIndex, score });
+        }
+    }
+    return [...byFrame.values()].sort((a, b) => b.score - a.score);
+}
+
 async function inspectStickerNsfw(frames, options = {}) {
+    const startedAt = Date.now();
+    const config = getRuntimeConfig();
     const result = {
         available: true,
         frames: [],
+        primaryFrames: 0,
+        regionScans: 0,
         violation: false,
         category: null,
         confidence: 0,
         frameIndex: 0,
+        region: "full",
         predictions: {},
+        reason: "",
+        pipelineVersion: NSFW_PIPELINE_VERSION,
         error: "",
     };
 
     try {
         for (let index = 0; index < (frames || []).length; index += 1) {
             try {
-                result.frames.push(await classifyNsfwFrame(frames[index], index));
+                result.frames.push(await classifyNsfwFrame(frames[index], index, "full"));
+                result.primaryFrames += 1;
             } catch (error) {
-                console.log(`[STICKER SAFETY] NSFW model unavailable: ${shortError(error)}`);
+                console.log(`[STICKER SAFETY] NSFW primary frame failed: ${shortError(error)}`);
             }
         }
 
-        const decision = evaluateNsfwPredictions(result.frames, options);
+        let decision = evaluateNsfwPredictions(result.frames, options);
+        if (!decision.violation) {
+            const rankedFrames = rankSuspiciousFrames(result.frames);
+            let suspiciousFrames = rankedFrames
+                .filter(item => item.score >= config.nsfwCropTriggerThreshold)
+                .slice(0, config.nsfwCropFrameCount);
+            if (!suspiciousFrames.length && rankedFrames.length) {
+                suspiciousFrames = rankedFrames.slice(0, options.isStatic ? 1 : config.nsfwCropFrameCount);
+            }
+            for (const suspicious of suspiciousFrames) {
+                const sourceFrame = frames[suspicious.frameIndex];
+                for (const region of buildNsfwRegions(sourceFrame, config.nsfwMaxRegions)) {
+                    try {
+                        result.frames.push(await classifyNsfwFrame({
+                            buffer: region.buffer,
+                            timestamp: sourceFrame?.timestamp,
+                        }, suspicious.frameIndex, region.name));
+                        result.regionScans += 1;
+                    } catch (error) {
+                        console.log(`[STICKER SAFETY] NSFW crop failed: ${shortError(error)}`);
+                    }
+                }
+            }
+            decision = evaluateNsfwPredictions(result.frames, options);
+        }
+
         Object.assign(result, decision);
+        nsfwRuntimeStats = {
+            lastScanAt: Date.now(),
+            lastResult: decision.violation ? "violation" : "clean",
+            lastCategory: decision.category || null,
+            lastConfidence: Number(decision.confidence || 0),
+            lastFrames: result.primaryFrames,
+            lastRegions: result.regionScans,
+            lastDurationMs: Date.now() - startedAt,
+            lastReason: decision.reason || "",
+        };
         return result;
     } catch (error) {
         result.available = false;
         result.error = shortError(error);
+        nsfwRuntimeStats = {
+            lastScanAt: Date.now(),
+            lastResult: "error",
+            lastCategory: null,
+            lastConfidence: 0,
+            lastFrames: result.primaryFrames,
+            lastRegions: result.regionScans,
+            lastDurationMs: Date.now() - startedAt,
+            lastReason: result.error,
+        };
         console.log(`[STICKER SAFETY] NSFW model unavailable: ${result.error}`);
         return result;
     }
+}
+
+async function warmupNsfwModel() {
+    await getNsfwModel();
+    return getStickerSafetyHealth();
+}
+
+function clearStickerSafetyCache() {
+    resultCache = {};
+    saveResultCache();
+    recentMessageIds.clear();
+    recentStickerHashes.clear();
+    return true;
 }
 
 async function inspectSticker(sock, msg, options = {}) {
@@ -988,7 +1236,8 @@ async function inspectSticker(sock, msg, options = {}) {
         }
 
         const hash = sha256(buffer);
-        const cached = !options.ignoreCache ? getCacheRecord(hash) : null;
+        const cacheKey = `${NSFW_PIPELINE_VERSION}:${hash}`;
+        const cached = !options.ignoreCache ? getCacheRecord(cacheKey) : null;
         if (cached) {
             return {
                 inspected: true,
@@ -1034,7 +1283,7 @@ async function inspectSticker(sock, msg, options = {}) {
             violationType,
         };
 
-        setCacheRecord(hash, {
+        setCacheRecord(cacheKey, {
             result: {
                 type: result.type,
                 frames: result.frames,
@@ -1055,8 +1304,15 @@ async function inspectSticker(sock, msg, options = {}) {
                     predictions: nsfw.predictions || {},
                     frames: (nsfw.frames || []).map(item => ({
                         frameIndex: item.frameIndex,
+                        region: item.region || "full",
+                        timestamp: item.timestamp ?? null,
                         predictions: item.predictions,
                     })),
+                    primaryFrames: nsfw.primaryFrames || 0,
+                    regionScans: nsfw.regionScans || 0,
+                    region: nsfw.region || "full",
+                    reason: nsfw.reason || "",
+                    pipelineVersion: nsfw.pipelineVersion || NSFW_PIPELINE_VERSION,
                     error: nsfw.error || "",
                 },
                 violation: result.violation,
@@ -1138,13 +1394,14 @@ function buildStickerNsfwWarning(msg, result, options = {}) {
     const isGroup = isGroupJid(msg?.key?.remoteJid);
     const senderJid = options.senderJid || getSenderJid(msg);
     const category = result?.nsfw?.category || "porn";
-    const title = category === "suggestive"
-        ? "⚠️ *PERINGATAN STIKER SENSITIF*"
+    const nudityCategory = ["nudity", "suggestive"].includes(category);
+    const title = nudityCategory
+        ? "⚠️ *PERINGATAN KETELANJANGAN STIKER*"
         : "🔞 *PERINGATAN KONTEN STIKER*";
-    const body = category === "suggestive"
+    const body = nudityCategory
         ? (isGroup
-            ? `@${getJidLabel(senderJid)}, stiker yang kamu kirim terdeteksi mengandung visual yang tidak pantas atau terlalu eksplisit.`
-            : "Stiker yang kamu kirim terdeteksi mengandung visual yang tidak pantas atau terlalu eksplisit.")
+            ? `@${getJidLabel(senderJid)}, stiker yang kamu kirim terdeteksi mengandung ketelanjangan atau visual seksual yang tidak pantas.`
+            : "Stiker yang kamu kirim terdeteksi mengandung ketelanjangan atau visual seksual yang tidak pantas.")
         : (isGroup
             ? `@${getJidLabel(senderJid)}, stiker yang kamu kirim terdeteksi mengandung konten dewasa atau pornografi.\n\nKonten seperti ini tidak sesuai untuk dikirim di grup.`
             : "Stiker yang kamu kirim terdeteksi mengandung konten dewasa atau pornografi.\n\nHarap jangan mengirim konten seperti ini.");
@@ -1301,16 +1558,21 @@ function formatStatus(groupJid = "", context = {}) {
     return [
         "🛡️ *Sticker Safety Guard*",
         "",
-        `Scope: ${isGroupJid(groupJid) ? groupJid : "global"}`,
+        `Scope: ${isGroupJid(groupJid) ? groupJid : "global (group + private)"}`,
         `Guard: ${config.enabled ? "ON" : "OFF"}`,
         `Text OCR: ${config.textEnabled ? "ON" : "OFF"}`,
-        `NSFW AI: ${config.nsfwEnabled ? "ON" : "OFF"}`,
+        `NSFW/Nudity AI: ${config.nsfwEnabled ? "ON" : "OFF"}`,
         `Debug: ${config.debug ? "ON" : "OFF"}`,
         "",
         `OCR: ${health.ocr}`,
         `NSFW AI: ${health.nsfw}`,
+        `NSFW Pipeline: ${health.nsfwPipelineVersion}`,
+        `Tensor Backend: ${health.tensorBackend}`,
+        `Frame Sampling: ${health.maxFrames} evenly distributed`,
+        `Crop Regions: up to ${health.maxRegions}`,
         `Queue: ${health.queue}`,
         `Cache: ${health.cache}`,
+        `Last NSFW Scan: ${health.lastNsfwResult} (${Math.round(Number(health.lastNsfwConfidence || 0) * 100)}%)`,
         "Legacy Sticker NSFW: OFF",
     ].join("\n");
 }
@@ -1325,7 +1587,9 @@ function formatHelp() {
         ".stikerguard text on/off",
         ".stikerguard nsfw on/off",
         ".stikerguard debug on/off",
-        ".stikerguard scan",
+        ".stikerguard scan — reply sticker untuk diagnosa",
+        ".stikerguard warmup — muat model NSFW",
+        ".stikerguard clearcache — hapus cache hasil lama",
         "",
         "Remote group owner:",
         ".stikerguard set <id_grup> on/off",
@@ -1338,32 +1602,36 @@ function formatHelp() {
         ".stikerword list",
         ".stikerword reload",
         "",
+        "NSFW/Nudity aktif untuk sticker statis dan animasi di group maupun private chat.",
         "Sticker Safety Guard terpisah dari Anti Kasar biasa.",
     ].join("\n");
 }
 
 function formatScanResult(result) {
     const frames = result?.nsfw?.frames || [];
-    const latestPredictions = result?.nsfw?.predictions
-        || frames[0]?.predictions
-        || {};
+    const latestPredictions = result?.nsfw?.predictions || frames[0]?.predictions || {};
     const percent = value => `${Math.round(Number(value || 0) * 100)}%`;
     return [
         "🧪 STICKER SAFETY SCAN",
         "",
         `Type: ${result?.type || "-"}`,
-        `Frames: ${result?.frames || 0}`,
+        `Primary Frames: ${result?.nsfw?.primaryFrames ?? result?.frames ?? 0}`,
+        `Crop Regions: ${result?.nsfw?.regionScans ?? 0}`,
+        `Pipeline: ${result?.nsfw?.pipelineVersion || NSFW_PIPELINE_VERSION}`,
         "",
         "OCR:",
         `Text: "${String(result?.ocr?.text || "").slice(0, 700)}"`,
         `Matched Words: ${(result?.ocr?.badWords || []).length}`,
         "",
-        "NSFW:",
+        "NSFW/Nudity:",
         `Porn: ${percent(latestPredictions.Porn)}`,
         `Hentai: ${percent(latestPredictions.Hentai)}`,
-        `Sexy: ${percent(latestPredictions.Sexy)}`,
+        `Sexy/Nudity: ${percent(latestPredictions.Sexy)}`,
         `Neutral: ${percent(latestPredictions.Neutral)}`,
         `Drawing: ${percent(latestPredictions.Drawing)}`,
+        `Evidence Frame: ${result?.nsfw?.frameIndex ?? 0}`,
+        `Evidence Region: ${result?.nsfw?.region || "full"}`,
+        `Reason: ${result?.nsfw?.reason || "-"}`,
         "",
         `Decision: ${result?.violation ? `${String(result.violationType || "").toUpperCase()} VIOLATION` : "SAFE / NO VIOLATION"}`,
         `Category: ${result?.nsfw?.category || result?.violationType || "-"}`,
@@ -1458,6 +1726,30 @@ async function handleStickerSafetyCommand(sock, msg, context = {}) {
             config: { enabled: true, textEnabled: true, nsfwEnabled: true, debug: true },
         }));
         await sock.sendMessage(from, { text: formatScanResult(result) });
+        return true;
+    }
+
+    if (action === "warmup") {
+        if (!isOwner) {
+            await sock.sendMessage(from, { text: "Warmup model hanya untuk owner." });
+            return true;
+        }
+        try {
+            const health = await warmupNsfwModel();
+            await sock.sendMessage(from, { text: `NSFW model READY.\n${health.nsfwDetail || health.nsfw}` });
+        } catch (error) {
+            await sock.sendMessage(from, { text: `NSFW model gagal dimuat: ${shortError(error)}` });
+        }
+        return true;
+    }
+
+    if (action === "clearcache") {
+        if (!isOwner) {
+            await sock.sendMessage(from, { text: "Clear cache hanya untuk owner." });
+            return true;
+        }
+        clearStickerSafetyCache();
+        await sock.sendMessage(from, { text: `Cache Sticker Safety dibersihkan. Pipeline aktif: ${NSFW_PIPELINE_VERSION}` });
         return true;
     }
 
@@ -1562,21 +1854,41 @@ function getStickerSafetyHealth() {
         cacheCount = Object.keys(loadResultCache()).length;
     } catch {}
     const effective = getEffectiveConfig("");
+    const runtime = getRuntimeConfig();
     return {
         enabled: effective.enabled,
         textEnabled: effective.textEnabled,
         nsfwEnabled: effective.nsfwEnabled,
+        scope: "GROUP + PRIVATE",
         ocr: ocrStatus === "READY" && ocrDetail ? `READY (${ocrDetail})` : ocrStatus,
-        ocrLangs: ocrLangsActive || getRuntimeConfig().ocrLangs,
+        ocrLangs: ocrLangsActive || runtime.ocrLangs,
         nsfw: nsfwStatus,
-        nsfwModel: getRuntimeConfig().nsfwModelName,
+        nsfwModel: runtime.nsfwModelName,
         nsfwDetail,
+        nsfwPipelineVersion: NSFW_PIPELINE_VERSION,
+        tensorBackend: tfBackendName,
+        maxFrames: runtime.maxFrames,
+        maxRegions: runtime.nsfwMaxRegions,
+        thresholds: {
+            porn: runtime.nsfwPornThreshold,
+            hentai: runtime.nsfwHentaiThreshold,
+            nudity: runtime.nsfwSexyThreshold,
+            hard: runtime.nsfwHardThreshold,
+        },
         queue: `${activeJobs}/${queue.length}`,
         queueActive: activeJobs,
         queuePending: queue.length,
         cache: cacheCount,
         legacyStickerNsfw: "OFF",
         sharp: !sharpLoadAttempted ? "LAZY" : sharp ? "READY" : `MISSING${sharpLoadError ? ` (${shortError(sharpLoadError)})` : ""}`,
+        lastNsfwAt: nsfwRuntimeStats.lastScanAt,
+        lastNsfwResult: nsfwRuntimeStats.lastResult,
+        lastNsfwCategory: nsfwRuntimeStats.lastCategory,
+        lastNsfwConfidence: nsfwRuntimeStats.lastConfidence,
+        lastNsfwFrames: nsfwRuntimeStats.lastFrames,
+        lastNsfwRegions: nsfwRuntimeStats.lastRegions,
+        lastNsfwDurationMs: nsfwRuntimeStats.lastDurationMs,
+        lastNsfwReason: nsfwRuntimeStats.lastReason,
     };
 }
 
@@ -1590,10 +1902,14 @@ module.exports = {
     inspectStickerText,
     inspectStickerNsfw,
     extractStickerFrames,
+    buildEvenSampleTimestamps,
+    probeMediaDuration,
     preprocessFrameForOcr,
     normalizeOcrText,
     findStickerBadWords,
     classifyNsfwFrame,
+    buildNsfwRegions,
+    getUnsafeScore,
     evaluateNsfwPredictions,
     buildStickerTextWarning,
     buildStickerNsfwWarning,
@@ -1603,4 +1919,7 @@ module.exports = {
     cleanupStickerSafety,
     disposeStickerSafety,
     getStickerSafetyHealth,
+    warmupNsfwModel,
+    clearStickerSafetyCache,
+    NSFW_PIPELINE_VERSION,
 };

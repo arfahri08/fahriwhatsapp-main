@@ -156,7 +156,21 @@ async function buildHealthText(services = {}) {
     }
 
     if (sticker) {
-        lines.push("", `Sticker Safety: ${yesNo(sticker.enabled)}`)
+        lines.push(
+            "",
+            `Sticker Safety: ${yesNo(sticker.enabled)}`,
+            `Sticker Safety Scope: ${sticker.scope || "GROUP + PRIVATE"}`,
+            `Sticker NSFW/Nudity: ${yesNo(sticker.nsfwEnabled)}`,
+            `Sticker NSFW Engine: ${sticker.nsfw || "UNKNOWN"}`,
+            `Sticker NSFW Model: ${sticker.nsfwModel || "UNKNOWN"}`,
+            `Sticker NSFW Backend: ${sticker.tensorBackend || "UNKNOWN"}`,
+            `Sticker NSFW Pipeline: ${sticker.nsfwPipelineVersion || "UNKNOWN"}`,
+            `Sticker NSFW Sampling: ${sticker.maxFrames ?? "-"} frames / ${sticker.maxRegions ?? "-"} crops`,
+            `Last Sticker NSFW Scan: ${formatTime(sticker.lastNsfwAt)}`,
+            `Last Sticker NSFW Result: ${sticker.lastNsfwResult || "UNKNOWN"}`,
+            `Last Sticker NSFW Category: ${sticker.lastNsfwCategory || "-"}`,
+            `Last Sticker NSFW Confidence: ${Math.round(Number(sticker.lastNsfwConfidence || 0) * 100)}%`
+        )
     }
 
     if (security) {

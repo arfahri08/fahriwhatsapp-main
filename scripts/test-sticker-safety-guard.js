@@ -158,3 +158,81 @@ test("model/tensor disposal", () => {
     assert(source.includes("tensor.dispose"));
 });
 
+
+test("static porn uses normal threshold, not hard-only", () => {
+    const result = guard.evaluateNsfwPredictions([
+        { frameIndex: 0, region: "full", predictions: { Porn: 0.8, Hentai: 0.02, Sexy: 0.05 } },
+    ], { isStatic: true });
+    assert.strictEqual(result.violation, true);
+    assert.strictEqual(result.category, "porn");
+    assert.strictEqual(result.reason, "porn-static-threshold");
+});
+
+test("static hentai uses normal threshold", () => {
+    const result = guard.evaluateNsfwPredictions([
+        { frameIndex: 0, region: "full", predictions: { Porn: 0.02, Hentai: 0.8, Sexy: 0.05 } },
+    ], { isStatic: true });
+    assert.strictEqual(result.violation, true);
+    assert.strictEqual(result.category, "hentai");
+});
+
+test("static nudity/sexy can trigger warning", () => {
+    const result = guard.evaluateNsfwPredictions([
+        { frameIndex: 0, region: "center", predictions: { Porn: 0.05, Hentai: 0.02, Sexy: 0.91 } },
+    ], { isStatic: true });
+    assert.strictEqual(result.violation, true);
+    assert.strictEqual(result.category, "nudity");
+});
+
+test("combined porn and hentai evidence triggers", () => {
+    const result = guard.evaluateNsfwPredictions([
+        { frameIndex: 0, region: "center", predictions: { Porn: 0.44, Hentai: 0.41, Sexy: 0.04 } },
+    ], { isStatic: true });
+    assert.strictEqual(result.violation, true);
+    assert.strictEqual(result.category, "explicit");
+});
+
+test("animated consensus counts distinct frames", () => {
+    const result = guard.evaluateNsfwPredictions([
+        { frameIndex: 0, region: "full", predictions: { Porn: 0.76 } },
+        { frameIndex: 0, region: "center", predictions: { Porn: 0.78 } },
+        { frameIndex: 1, region: "full", predictions: { Porn: 0.74 } },
+    ], { isStatic: false });
+    assert.strictEqual(result.violation, true);
+    assert.strictEqual(result.category, "porn");
+});
+
+test("multiple crops of one animated frame do not fake temporal consensus", () => {
+    const result = guard.evaluateNsfwPredictions([
+        { frameIndex: 0, region: "full", predictions: { Porn: 0.71, Hentai: 0.01, Sexy: 0.02 } },
+        { frameIndex: 0, region: "center", predictions: { Porn: 0.71, Hentai: 0.01, Sexy: 0.02 } },
+        { frameIndex: 1, region: "full", predictions: { Porn: 0.05, Hentai: 0.01, Sexy: 0.02 } },
+    ], { isStatic: false });
+    assert.strictEqual(result.violation, false);
+});
+
+test("animated timestamps cover full duration", () => {
+    assert.deepStrictEqual(guard.buildEvenSampleTimestamps(4, 5), [0, 0.99, 1.98, 2.97, 3.96]);
+});
+
+test("cache pipeline version invalidates old clean results", () => {
+    assert.strictEqual(guard.NSFW_PIPELINE_VERSION, "sticker-nsfw-v2");
+    assert(source.includes("`${NSFW_PIPELINE_VERSION}:${hash}`"));
+});
+
+test("bundled named NSFW model is loaded", () => {
+    assert(source.includes("nsfwRuntime.load(config.nsfwModelName)"));
+    assert(!source.includes("nsfwRuntime.load(undefined"));
+});
+
+test("NSFW scan uses evenly distributed animated sampling", () => {
+    assert(source.includes("buildEvenSampleTimestamps"));
+    assert(source.includes("probeMediaDuration"));
+    assert(source.includes("extractFrameAtTimestamp"));
+});
+
+test("NSFW scan has crop-region second pass", () => {
+    assert(source.includes("buildNsfwRegions"));
+    assert(source.includes("regionScans"));
+    assert(source.includes("rankSuspiciousFrames"));
+});
