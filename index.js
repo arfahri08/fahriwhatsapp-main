@@ -3504,27 +3504,34 @@ async function startBot() {
 
         const isStickerMediaMessage = Boolean(stickerSafetyGuard.isStickerMessage?.(msg))
         let backgroundStickerSafetyPromise = null
-        if (isStickerMediaMessage) {
-            // Moderasi visual/OCR adalah pekerjaan berat. Jalankan di background agar
-            // router utama tidak menahan command atau pesan lain selama puluhan detik.
-            backgroundStickerSafetyPromise = routerTrace.run(msg, traceContext, "stickerSafetyGuardBackground", () => stickerSafetyGuard.handleStickerSafety(sock, msg, {
-                from,
-                sender: senderJid,
-                senderJid,
-                text,
-                isGroup,
-                canControlOwner,
-                isOwner,
-                groupRemoteControl,
-                lidAliasStore,
-                fastMode: true,
-            }))
-            Promise.resolve(backgroundStickerSafetyPromise).catch(error => {
+        const startBackgroundStickerSafety = () => {
+            if (!isStickerMediaMessage) return Promise.resolve(null)
+            if (backgroundStickerSafetyPromise) return backgroundStickerSafetyPromise
+
+            // Detector visual yang sudah stabil tidak diubah. Hanya waktu mulainya
+            // ditunda sampai OCR teks stiker selesai agar dua engine berat tidak
+            // berebut CPU dan warning kata kasar tidak menunggu detector visual.
+            backgroundStickerSafetyPromise = Promise.resolve(
+                routerTrace.run(msg, traceContext, "stickerSafetyGuardBackground", () => stickerSafetyGuard.handleStickerSafety(sock, msg, {
+                    from,
+                    sender: senderJid,
+                    senderJid,
+                    text,
+                    isGroup,
+                    canControlOwner,
+                    isOwner,
+                    groupRemoteControl,
+                    lidAliasStore,
+                    fastMode: true,
+                }))
+            ).catch(error => {
                 console.log("[STICKER MODERATION] background safety error", {
                     id: msg?.key?.id,
                     error: String(error?.message || error).slice(0, 240),
                 })
+                return null
             })
+            return backgroundStickerSafetyPromise
         }
 
         const antiToxicControlHandled = !isGroup && await routerTrace.run(msg, traceContext, "antiToxicControl", () => antiToxicControl.handleAntiToxicControlCommand(sock, msg, {
@@ -3543,7 +3550,7 @@ async function startBot() {
             && /^(1|true|yes|on)$/i.test(String(
             process.env.ANTI_TOXIC_STICKER_WARN_FROM_ME
                 || process.env.ANTI_TOXIC_TEST_STICKER_FROM_ME
-                || "false"
+                || "true"
             ).trim())
         const allowFromMeTextModeration = isMe && isAntiToxicWarnOwnerEnabled()
         const skipAntiToxicBecauseBotGenerated = isMe && isBotGeneratedMessage(msg)
@@ -3639,11 +3646,10 @@ async function startBot() {
             }))
 
             if (isStickerMediaMessage) {
-                // Jalankan OCR tulisan stiker setelah pemindai visual selesai supaya dua
-                // engine berat tidak berebut CPU pada saat yang sama. Hasil warning tetap
-                // dikirim, tetapi pemrosesan pesan utama langsung dilepas.
-                const moderationChain = Promise.resolve(backgroundStickerSafetyPromise)
-                    .catch(() => null)
+                // OCR kata kasar mendapat prioritas pertama. Setelah OCR selesai,
+                // detector visual yang sudah ada baru dijalankan. Router utama tetap
+                // dilepas langsung dan kedua engine tidak berebut CPU.
+                const moderationChain = Promise.resolve()
                     .then(runAntiToxicCheck)
                     .then(result => {
                         debugAntiToxicPipeline("after-handle-toxic-check-background", {
@@ -3659,7 +3665,9 @@ async function startBot() {
                             id: msg?.key?.id,
                             error: String(error?.message || error).slice(0, 240),
                         })
+                        return false
                     })
+                    .then(() => startBackgroundStickerSafety())
                 void moderationChain
             } else {
                 toxicHandled = await runAntiToxicCheck()
@@ -3671,6 +3679,13 @@ async function startBot() {
                     toxicHandled,
                 })
             }
+        }
+
+        // Jika Anti Kasar dimatikan untuk chat ini, detector visual tetap harus jalan.
+        if (isStickerMediaMessage && !backgroundStickerSafetyPromise && (
+            skipAntiToxicBecauseFromMeNonCommand || !shouldRunAntiToxicForMessage
+        )) {
+            void startBackgroundStickerSafety()
         }
 
         // Sticker sudah masuk jalur moderasi background. Jangan teruskan ke router

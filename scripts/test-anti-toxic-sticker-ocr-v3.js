@@ -37,7 +37,7 @@ async function run() {
     assert(source.includes("buildPngJsCandidates"), "Termux-safe PNGJS preprocessing must exist")
     assert(source.includes("recognizeCandidateWithCli"), "native Tesseract CLI fallback must exist")
     assert(source.includes("ANTI_TOXIC_STICKER_OCR_MAX_PASSES"), "bounded OCR pass setting must exist")
-    assert.strictEqual(ocr.PIPELINE_VERSION, "anti-toxic-sticker-ocr-v3")
+    assert.strictEqual(ocr.PIPELINE_VERSION, "anti-toxic-sticker-ocr-v5-restored")
 
     for (const raw of ["TAI", "TA1", "TAl", "T A I", "T.A.I", "TA!"]) {
         const candidates = ocr.normalizeOcrCandidates(raw)
@@ -116,7 +116,7 @@ async function run() {
 
     const health = ocr.getAntiToxicStickerOcrHealth({ toxicWords: WORDS })
     assert.strictEqual(health.containsTai, true)
-    assert.strictEqual(health.cacheVersion, "anti-toxic-sticker-ocr-v3")
+    assert.strictEqual(health.cacheVersion, "anti-toxic-sticker-ocr-v5-restored")
 
     console.log(JSON.stringify({
         marker: "ANTI_TOXIC_STICKER_OCR_V3_TESTS_OK",

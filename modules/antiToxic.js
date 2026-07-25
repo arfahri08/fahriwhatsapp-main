@@ -48,7 +48,7 @@ const ANTI_TOXIC_WARN_OWNER_MESSAGES = /^(1|true|yes|on)$/i.test(
     String(process.env.ANTI_TOXIC_WARN_OWNER_MESSAGES || process.env.ANTI_TOXIC_TEST_OWNER || "false").trim()
 );
 const ANTI_TOXIC_STICKER_WARN_FROM_ME = /^(1|true|yes|on)$/i.test(
-    String(process.env.ANTI_TOXIC_STICKER_WARN_FROM_ME || process.env.ANTI_TOXIC_TEST_STICKER_FROM_ME || "false").trim()
+    String(process.env.ANTI_TOXIC_STICKER_WARN_FROM_ME || process.env.ANTI_TOXIC_TEST_STICKER_FROM_ME || "true").trim()
 );
 const EXACT_MATCH_IGNORED_WORDS = new Set();
 const antiToxicWarningLocks = new Map();
@@ -2058,19 +2058,61 @@ async function readStickerTextWithOcr(buffer, details = {}) {
     return "";
 }
 
-async function getStickerOcrTextIfNeeded(msg, sock) {
+async function getStickerOcrResultIfNeeded(msg, sock) {
     void sock;
-    if (!ANTI_TOXIC_STICKER_OCR_ENABLED || !isStickerMessage(msg)) return "";
+    if (!ANTI_TOXIC_STICKER_OCR_ENABLED || !isStickerMessage(msg)) return null;
 
-    const result = await antiToxicStickerOcr.scanStickerForToxicWords(msg, {
+    return antiToxicStickerOcr.scanStickerForToxicWords(msg, {
         stickerMessage: getStickerMessage(msg),
         toxicWords: loadWords(),
     });
+}
+
+async function getStickerOcrTextIfNeeded(msg, sock) {
+    const result = await getStickerOcrResultIfNeeded(msg, sock);
 
     // Hanya canonical match diteruskan ke detector Anti Kasar existing.
-    // Warning, mention, quoted reply, reflection, dan cooldown tetap ditangani
-    // oleh flow handleToxicCheck yang sama dengan pesan teks biasa.
+    // Detail OCR tetap dipertahankan agar warning dapat menyorot kata yang
+    // benar-benar terdeteksi pada stiker.
     return result?.status === "toxic" ? String(result.matchedWord || "") : "";
+}
+
+function normalizeStickerOcrWarningText(value) {
+    return String(value || "")
+        .normalize("NFKC")
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}]+/gu, "")
+        .trim();
+}
+
+function sanitizeStickerOcrWarningWord(value) {
+    return String(value || "")
+        .normalize("NFKC")
+        .replace(/[`*_~]/g, "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 80);
+}
+
+function buildStickerOcrWarningContext(result, fallbackWord = "") {
+    const matchedWord = sanitizeStickerOcrWarningWord(result?.matchedWord || fallbackWord);
+    if (!matchedWord) return "";
+
+    const rawText = String(result?.matchedRawText || result?.rawTexts?.[0] || "")
+        .replace(/[\r\n\t]+/g, " ")
+        .replace(/\s{2,}/g, " ")
+        .trim()
+        .slice(0, 160);
+    const rawDetail = rawText
+        && normalizeStickerOcrWarningText(rawText) !== normalizeStickerOcrWarningText(matchedWord)
+        ? `\nTeks OCR: "${rawText}"`
+        : "";
+
+    return [
+        "🧾 *TEKS KASAR PADA STIKER*",
+        `> *Kata terdeteksi:* \`${matchedWord}\`${rawDetail}`,
+        "",
+    ].join("\n");
 }
 
 async function getIncomingToxicText(msg, sock) {
@@ -4455,7 +4497,10 @@ async function handleToxicCheckInner(msg, sock, ownerJid, options = {}) {
 
     if (!senderJid) return false;
 
-    const stickerOcrText = rawText ? "" : await getStickerOcrTextIfNeeded(msg, sock);
+    const stickerOcrResult = rawText ? null : await getStickerOcrResultIfNeeded(msg, sock);
+    const stickerOcrText = stickerOcrResult?.status === "toxic"
+        ? String(stickerOcrResult.matchedWord || "")
+        : "";
     const text = rawText || stickerOcrText;
     const isStickerOcr = !rawText && Boolean(stickerOcrText);
     if (!text) {
@@ -4656,18 +4701,18 @@ async function handleToxicCheckInner(msg, sock, ownerJid, options = {}) {
         const translationContextText = toxicMatch.detectionSource === "translated" && translatedPreview
             ? `Terdeteksi dari hasil translate (${toxicMatch.detectedLanguage || "auto"} -> ${toxicMatch.translatedLanguage || "id"}): "${translatedPreview}"\n`
             : "";
-        const stickerOcrPreview = isStickerOcr
-            ? String(text || "").replace(/\s+/g, " ").trim().slice(0, 120)
-            : "";
-        const stickerOcrContextText = stickerOcrPreview
-            ? `Terdeteksi dari teks pada sticker: "${stickerOcrPreview}"\n`
+        const stickerOcrContextText = isStickerOcr
+            ? buildStickerOcrWarningContext(stickerOcrResult, triggeredWord)
             : "";
         const detectionDetailText = buildDetectionDetailText(toxicMatch, triggeredWord, canonicalWord);
+        const detectionOpeningText = isStickerOcr
+            ? "Stiker yang kamu kirim terdeteksi mengandung kata kasar.\n"
+            : `Kamu terdeteksi mengucapkan kata kasar terlarang: *"${triggeredWord}"*!\n`;
         const responseText =
             `${mentionHeader}\n\n` +
-            `Kamu terdeteksi mengucapkan kata kasar terlarang: *"${triggeredWord}"*!\n` +
-            detectionDetailText +
+            detectionOpeningText +
             stickerOcrContextText +
+            detectionDetailText +
             translationContextText +
             "Tolong jangan diulangi lagi ya. Mari saling menjaga lisan.\n\n" +
             `✨ *Renungan Hari Ini (${quote.source})* ✨\n` +
@@ -4983,18 +5028,18 @@ async function handleToxicCheckInner(msg, sock, ownerJid, options = {}) {
     const translationContextText = toxicMatch.detectionSource === "translated" && translatedPreview
         ? `Terdeteksi dari hasil translate (${toxicMatch.detectedLanguage || "auto"} -> ${toxicMatch.translatedLanguage || "id"}): "${translatedPreview}"\n`
         : "";
-    const stickerOcrPreview = isStickerOcr
-        ? String(text || "").replace(/\s+/g, " ").trim().slice(0, 120)
-        : "";
-    const stickerOcrContextText = stickerOcrPreview
-        ? `Terdeteksi dari teks pada sticker: "${stickerOcrPreview}"\n`
+    const stickerOcrContextText = isStickerOcr
+        ? buildStickerOcrWarningContext(stickerOcrResult, triggeredWord)
         : "";
     const detectionDetailText = buildDetectionDetailText(toxicMatch, triggeredWord, canonicalWord);
+    const detectionOpeningText = isStickerOcr
+        ? "Stiker yang kamu kirim terdeteksi mengandung kata kasar.\n"
+        : `Kamu terdeteksi mengucapkan kata kasar terlarang: *"${triggeredWord}"*!\n`;
     const responseText =
         `${mentionHeader}\n\n` +
-        `Kamu terdeteksi mengucapkan kata kasar terlarang: *"${triggeredWord}"*!\n` +
-        detectionDetailText +
+        detectionOpeningText +
         stickerOcrContextText +
+        detectionDetailText +
         translationContextText +
         "Tolong jangan diulangi lagi ya. Mari saling menjaga lisan.\n\n" +
         `✨ *Renungan Hari Ini (${quote.source})* ✨\n` +
@@ -5216,4 +5261,5 @@ module.exports = {
     }),
     clearAntiToxicStickerOcrCache: antiToxicStickerOcr.clearAntiToxicStickerOcrCache,
     disposeAntiToxicStickerOcr: antiToxicStickerOcr.disposeAntiToxicStickerOcr,
+    buildStickerOcrWarningContext,
 };

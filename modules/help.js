@@ -44,7 +44,7 @@ function generateHelpMenu() {
         ".antikasar status",
         ".renungctl",
         ".kasarsafe status/test/collisions",
-        ".kasarocr status/test",
+        ".kasarocr status/test/clearcache — OCR kata kasar stiker + highlight kata",
         "",
         "🛡️ *STICKER SAFETY — GROUP + PRIVATE*",
         ".stikerguard status",

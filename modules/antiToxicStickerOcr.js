@@ -6,7 +6,7 @@ const os = require("os")
 const path = require("path")
 const { execFile, spawnSync } = require("child_process")
 
-const PIPELINE_VERSION = "anti-toxic-sticker-ocr-v4-fast"
+const PIPELINE_VERSION = "anti-toxic-sticker-ocr-v5-restored"
 const resultCache = new Map()
 const inFlightScans = new Map()
 const scanQueue = []
@@ -59,13 +59,13 @@ function getRuntimeConfig() {
             ? parseBool(process.env.ANTI_TOXIC_STICKER_OCR_DEBUG, false)
             : debugOverride,
         maxBytes: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MAX_BYTES, 3 * 1024 * 1024, 1024),
-        maxCandidates: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MAX_CANDIDATES, 6, 2, 12),
+        maxCandidates: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MAX_CANDIDATES, 9, 3, 15),
         maxFrames: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MAX_FRAMES, 3, 1, 5),
         timeoutMs: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_TIMEOUT_MS, 15000, 5000, 45000),
         cacheLimit: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_CACHE_LIMIT, 300, 1, 2000),
-        cacheTtlMs: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_CACHE_TTL_MS, 24 * 60 * 60 * 1000, 1000),
+        cacheTtlMs: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_CACHE_TTL_MS, 4 * 60 * 60 * 1000, 1000),
         errorCacheTtlMs: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_ERROR_CACHE_TTL_MS, 10 * 60 * 1000, 1000),
-        queueMax: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_QUEUE_MAX, 2, 1, 8),
+        queueMax: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_QUEUE_MAX, 6, 1, 12),
         concurrency: 1,
         ffmpegBin: String(process.env.FFMPEG_BIN || process.env.FFMPEG_PATH || "ffmpeg").trim() || "ffmpeg",
         ffprobeBin: String(process.env.FFPROBE_BIN || "ffprobe").trim() || "ffprobe",
@@ -75,7 +75,7 @@ function getRuntimeConfig() {
         animatedFfmpegFallback: parseBool(process.env.ANTI_TOXIC_STICKER_OCR_ANIMATED_FFMPEG_FALLBACK, false),
         mediumConfidence: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MEDIUM_CONFIDENCE, 25, 1, 100),
         exactShortConfidence: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_EXACT_SHORT_CONFIDENCE, 10, 0, 100),
-        maxPasses: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MAX_PASSES, 6, 1, 16),
+        maxPasses: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MAX_PASSES, 9, 3, 18),
         pngjsEnabled: parseBool(process.env.ANTI_TOXIC_STICKER_OCR_PNGJS, true),
         cliEnabled: parseBool(process.env.ANTI_TOXIC_STICKER_OCR_CLI_FALLBACK, true),
         tesseractBin: String(process.env.TESSERACT_BIN || "tesseract").trim() || "tesseract",
@@ -385,8 +385,11 @@ function buildPngJsCandidates(frames, options = {}) {
         { name: "pngjs-white-gray", background: "white", mode: "gray", scale: 5 },
     ]
     const candidates = []
-    for (const frame of frames) {
-        for (const variant of variants) {
+
+    // Variant-major ordering guarantees every sampled animation frame gets at
+    // least one strong OCR candidate before extra variants consume the budget.
+    for (const variant of variants) {
+        for (const frame of frames) {
             if (candidates.length >= config.maxCandidates) return candidates
             try {
                 const buffer = renderPngJsVariant(frame.buffer, variant)
@@ -683,8 +686,8 @@ async function preprocessStickerCandidates(frameInput, options = {}) {
             { name: "sharp-white-threshold-high", background: "#ffffff", scale: 5, grayscale: true, normalize: true, sharpen: true, threshold: 195 },
             { name: "sharp-trimmed", background: "#ffffff", scale: 5, grayscale: true, normalize: true, sharpen: true, trim: true },
         ]
-        for (const frame of frames) {
-            for (const variant of variants) {
+        for (const variant of variants) {
+            for (const frame of frames) {
                 if (candidates.length >= config.maxCandidates) break
                 try {
                     const rendered = await renderPreprocessVariant(frame, variant, sharp)
@@ -697,6 +700,7 @@ async function preprocessStickerCandidates(frameInput, options = {}) {
                     })
                 }
             }
+            if (candidates.length >= config.maxCandidates) break
         }
     }
 
@@ -1212,6 +1216,10 @@ async function runScan(msg, options, initialKey) {
                 reason: "toxic",
                 matchedWord: decision.match.word,
                 matchedCandidate: decision.match.candidate,
+                matchedRawText: raw.slice(0, 300),
+                matchedFrameIndex: Number(candidate.frameIndex || 0),
+                matchedPreprocess: String(candidate.candidate || "original"),
+                matchedPsm: String(psm || ""),
                 confidence: decision.confidence,
                 engine: engineName,
                 engines: [...baseResult.engines],
@@ -1551,6 +1559,9 @@ function getDiagnosticText(result) {
         normalized,
         "",
         `Matched word: ${result.matchedWord || "-"}`,
+        `Matched OCR: ${result.matchedRawText || "-"}`,
+        `Matched frame: ${result.matchedFrameIndex ?? "-"}`,
+        `Matched preprocess: ${result.matchedPreprocess || "-"}`,
         "",
         "Result:",
         verdict,
