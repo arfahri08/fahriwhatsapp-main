@@ -4698,13 +4698,13 @@ async function handleToxicCheckInner(msg, sock, ownerJid, options = {}) {
         });
         const quote = pickQuote(reflectionPreference?.profile);
         const translatedPreview = String(toxicMatch.translatedText || "").replace(/\s+/g, " ").trim().slice(0, 120);
-        const translationContextText = toxicMatch.detectionSource === "translated" && translatedPreview
+        const translationContextText = !isStickerOcr && toxicMatch.detectionSource === "translated" && translatedPreview
             ? `Terdeteksi dari hasil translate (${toxicMatch.detectedLanguage || "auto"} -> ${toxicMatch.translatedLanguage || "id"}): "${translatedPreview}"\n`
             : "";
         const stickerOcrContextText = isStickerOcr
             ? buildStickerOcrWarningContext(stickerOcrResult, triggeredWord)
             : "";
-        const detectionDetailText = buildDetectionDetailText(toxicMatch, triggeredWord, canonicalWord);
+        const detectionDetailText = isStickerOcr ? "" : buildDetectionDetailText(toxicMatch, triggeredWord, canonicalWord);
         const detectionOpeningText = isStickerOcr
             ? "Stiker yang kamu kirim terdeteksi mengandung kata kasar.\n"
             : `Kamu terdeteksi mengucapkan kata kasar terlarang: *"${triggeredWord}"*!\n`;
@@ -5025,13 +5025,13 @@ async function handleToxicCheckInner(msg, sock, ownerJid, options = {}) {
     });
     const quote = pickQuote(reflectionPreference?.profile);
     const translatedPreview = String(toxicMatch.translatedText || "").replace(/\s+/g, " ").trim().slice(0, 120);
-    const translationContextText = toxicMatch.detectionSource === "translated" && translatedPreview
+    const translationContextText = !isStickerOcr && toxicMatch.detectionSource === "translated" && translatedPreview
         ? `Terdeteksi dari hasil translate (${toxicMatch.detectedLanguage || "auto"} -> ${toxicMatch.translatedLanguage || "id"}): "${translatedPreview}"\n`
         : "";
     const stickerOcrContextText = isStickerOcr
         ? buildStickerOcrWarningContext(stickerOcrResult, triggeredWord)
         : "";
-    const detectionDetailText = buildDetectionDetailText(toxicMatch, triggeredWord, canonicalWord);
+    const detectionDetailText = isStickerOcr ? "" : buildDetectionDetailText(toxicMatch, triggeredWord, canonicalWord);
     const detectionOpeningText = isStickerOcr
         ? "Stiker yang kamu kirim terdeteksi mengandung kata kasar.\n"
         : `Kamu terdeteksi mengucapkan kata kasar terlarang: *"${triggeredWord}"*!\n`;
