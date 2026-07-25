@@ -6,7 +6,7 @@ const os = require("os")
 const path = require("path")
 const { execFile, spawnSync } = require("child_process")
 
-const PIPELINE_VERSION = "anti-toxic-sticker-ocr-v5.1-fast-robust"
+const PIPELINE_VERSION = "anti-toxic-sticker-ocr-v5.2-text-region"
 const resultCache = new Map()
 const inFlightScans = new Map()
 const scanQueue = []
@@ -59,7 +59,7 @@ function getRuntimeConfig() {
             ? parseBool(process.env.ANTI_TOXIC_STICKER_OCR_DEBUG, false)
             : debugOverride,
         maxBytes: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MAX_BYTES, 3 * 1024 * 1024, 1024),
-        maxCandidates: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MAX_CANDIDATES, 6, 3, 12),
+        maxCandidates: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MAX_CANDIDATES, 10, 4, 16),
         maxFrames: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MAX_FRAMES, 3, 1, 5),
         timeoutMs: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_TIMEOUT_MS, 12000, 5000, 45000),
         cacheLimit: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_CACHE_LIMIT, 300, 1, 2000),
@@ -75,7 +75,7 @@ function getRuntimeConfig() {
         animatedFfmpegFallback: parseBool(process.env.ANTI_TOXIC_STICKER_OCR_ANIMATED_FFMPEG_FALLBACK, false),
         mediumConfidence: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MEDIUM_CONFIDENCE, 25, 1, 100),
         exactShortConfidence: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_EXACT_SHORT_CONFIDENCE, 10, 0, 100),
-        maxPasses: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MAX_PASSES, 7, 3, 15),
+        maxPasses: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MAX_PASSES, 12, 4, 20),
         pngjsEnabled: parseBool(process.env.ANTI_TOXIC_STICKER_OCR_PNGJS, true),
         cliEnabled: parseBool(process.env.ANTI_TOXIC_STICKER_OCR_CLI_FALLBACK, true),
         tesseractBin: String(process.env.TESSERACT_BIN || "tesseract").trim() || "tesseract",
@@ -394,6 +394,63 @@ function renderPngJsVariant(frameBuffer, variant = {}) {
     return pngjs.PNG.sync.write(output)
 }
 
+function cropPngBufferNormalized(frameBuffer, region) {
+    const pngjs = getPngJs()
+    if (!pngjs?.PNG?.sync) throw makeOcrError("preprocessing_failed", pngjsLoadError || "pngjs tidak tersedia")
+    const source = pngjs.PNG.sync.read(frameBuffer)
+    const left = Math.max(0, Math.min(source.width - 1, Math.floor(Number(region.left || 0) * source.width)))
+    const top = Math.max(0, Math.min(source.height - 1, Math.floor(Number(region.top || 0) * source.height)))
+    const right = Math.max(left + 1, Math.min(source.width, Math.ceil(Number(region.right || 1) * source.width)))
+    const bottom = Math.max(top + 1, Math.min(source.height, Math.ceil(Number(region.bottom || 1) * source.height)))
+    const width = right - left
+    const height = bottom - top
+    const output = new pngjs.PNG({ width, height })
+    pngjs.PNG.bitblt(source, output, left, top, width, height, 0, 0)
+    return pngjs.PNG.sync.write(output)
+}
+
+function buildTextRegionFrames(frames, options = {}) {
+    const config = { ...getRuntimeConfig(), ...options }
+    const regionDefs = [
+        // Small sticker captions are commonly placed around the lower-middle.
+        // This region is deliberately first because full-frame OCR tends to
+        // treat the photo/background as text and miss a short label such as TAI.
+        { name: "lower-center", left: 0.15, top: 0.42, right: 0.95, bottom: 1.00 },
+        { name: "bottom-right", left: 0.38, top: 0.40, right: 1.00, bottom: 1.00 },
+        { name: "bottom-left", left: 0.00, top: 0.40, right: 0.62, bottom: 1.00 },
+        { name: "bottom-band", left: 0.00, top: 0.55, right: 1.00, bottom: 1.00 },
+        { name: "upper-center", left: 0.15, top: 0.00, right: 0.95, bottom: 0.58 },
+        { name: "center", left: 0.12, top: 0.16, right: 0.88, bottom: 0.84 },
+    ]
+    const expanded = []
+    for (const frame of frames || []) {
+        for (const region of regionDefs) {
+            try {
+                const buffer = cropPngBufferNormalized(frame.buffer, region)
+                const geometry = inspectPngCandidateGeometry(buffer)
+                if (!geometry.valid || geometry.width < 40 || geometry.height < 32) continue
+                expanded.push({
+                    ...frame,
+                    buffer,
+                    textRegion: region.name,
+                    sourceWidth: geometry.width,
+                    sourceHeight: geometry.height,
+                })
+            } catch (error) {
+                debugLog("text region crop failed", {
+                    frame: frame.frameIndex,
+                    region: region.name,
+                    error: shortError(error),
+                })
+            }
+        }
+        // Full frame remains a fallback, but it no longer consumes all early passes.
+        expanded.push({ ...frame, textRegion: "full" })
+    }
+    const frameLimit = Math.max(config.maxCandidates, (frames || []).length)
+    return expanded.slice(0, frameLimit)
+}
+
 function inspectPngCandidateGeometry(buffer) {
     try {
         const pngjs = getPngJs()
@@ -413,41 +470,45 @@ function inspectPngCandidateGeometry(buffer) {
 function buildPngJsCandidates(frames, options = {}) {
     const config = { ...getRuntimeConfig(), ...options }
     if (!config.pngjsEnabled || !getPngJs()) return []
+    const regionFrames = buildTextRegionFrames(frames, config)
     const variants = [
-        // Full-frame candidates are deliberately first. They cannot collapse
-        // into the narrow 12x1513 artefact seen in the runtime log.
-        { name: "pngjs-full-white-gray", background: "white", mode: "gray", crop: false, scale: 3 },
-        { name: "pngjs-full-white-otsu", background: "white", mode: "threshold", crop: false, scale: 3 },
-        { name: "pngjs-white-gray", background: "white", mode: "gray", crop: true, scale: 4 },
-        { name: "pngjs-white-otsu", background: "white", mode: "threshold", crop: true, scale: 4 },
-        { name: "pngjs-white-otsu-low", background: "white", mode: "threshold", thresholdOffset: -24, crop: true, scale: 4 },
-        { name: "pngjs-black-otsu", background: "black", mode: "threshold", crop: true, scale: 4 },
+        // Region candidates are scanned before full-frame candidates. This
+        // isolates small caption boxes from busy photo backgrounds.
+        { name: "pngjs-region-gray", background: "white", mode: "gray", crop: false, scale: 5 },
+        { name: "pngjs-region-otsu", background: "white", mode: "threshold", crop: false, scale: 5 },
+        { name: "pngjs-region-otsu-low", background: "white", mode: "threshold", thresholdOffset: -24, crop: false, scale: 5 },
+        { name: "pngjs-region-black-otsu", background: "black", mode: "threshold", crop: false, scale: 5 },
     ]
     const candidates = []
 
-    // Variant-major ordering gives every sampled animation frame an equal OCR
-    // opportunity before extra variants consume the bounded pass budget.
     for (const variant of variants) {
-        for (const frame of frames) {
+        for (const frame of regionFrames) {
             if (candidates.length >= config.maxCandidates) return candidates
             try {
                 const buffer = renderPngJsVariant(frame.buffer, variant)
                 if (!buffer?.length) continue
                 const geometry = inspectPngCandidateGeometry(buffer)
+                const candidateName = `${frame.textRegion === "full" ? "full" : `roi-${frame.textRegion}`}-${variant.name}`
                 if (!geometry.valid) {
                     debugLog("candidate skipped: invalid geometry", {
                         frame: frame.frameIndex,
-                        candidate: variant.name,
+                        candidate: candidateName,
                         size: `${geometry.width}x${geometry.height}`,
                         aspect: Number(geometry.aspect || 0).toFixed(1),
                     })
                     continue
                 }
-                candidates.push({ ...frame, buffer, candidate: variant.name, width: geometry.width, height: geometry.height })
+                candidates.push({
+                    ...frame,
+                    buffer,
+                    candidate: candidateName,
+                    width: geometry.width,
+                    height: geometry.height,
+                })
             } catch (error) {
                 debugLog("pngjs preprocessing failed", {
                     frame: frame.frameIndex,
-                    candidate: variant.name,
+                    candidate: `${frame.textRegion || "full"}-${variant.name}`,
                     error: shortError(error),
                 })
             }
@@ -1215,9 +1276,11 @@ function getPsmModes(options = {}) {
     if (Array.isArray(options.psmModes) && options.psmModes.length) return options.psmModes
     const tesseract = getTesseract()
     return [
+        // Sparse modes work better for a short word inside a small sticker label.
+        tesseract?.PSM?.SPARSE_TEXT || "11",
+        tesseract?.PSM?.SPARSE_TEXT_OSD || "12",
         tesseract?.PSM?.SINGLE_LINE || "7",
         tesseract?.PSM?.SINGLE_WORD || "8",
-        tesseract?.PSM?.SPARSE_TEXT || "11",
     ]
 }
 
@@ -1353,7 +1416,7 @@ async function runScan(msg, options, initialKey) {
         // slower WASM worker path. Tesseract.js remains the automatic fallback.
         const cliProbe = config.cliEnabled ? probeTesseractCli() : { ready: false, detail: "OFF" }
         if (cliProbe.ready) {
-            const cliPlan = getRecognitionPlan(candidates.slice(0, 4), psmModes, Math.min(4, config.maxPasses))
+            const cliPlan = getRecognitionPlan(candidates.slice(0, 8), psmModes, Math.min(10, config.maxPasses))
             for (const step of cliPlan) {
                 const remaining = config.timeoutMs - (Date.now() - startedAt)
                 if (remaining <= 900) break
