@@ -5,7 +5,8 @@ const fs = require("fs");
 const path = require("path");
 const guard = require("../modules/stickerSafetyGuard");
 
-const source = fs.readFileSync(path.join(__dirname, "..", "modules", "stickerSafetyGuard.js"), "utf8");
+const ROOT = path.join(__dirname, "..");
+const source = fs.readFileSync(path.join(ROOT, "modules", "stickerSafetyGuard.js"), "utf8");
 
 function test(name, fn) {
     try {
@@ -216,7 +217,7 @@ test("animated timestamps cover full duration", () => {
 });
 
 test("cache pipeline version invalidates old clean results", () => {
-    assert.strictEqual(guard.NSFW_PIPELINE_VERSION, "sticker-nsfw-v6-local-vision");
+    assert.strictEqual(guard.NSFW_PIPELINE_VERSION, "sticker-nsfw-v6-fast-background");
     assert(source.includes("`${NSFW_PIPELINE_VERSION}:${hash}`"));
 });
 
@@ -247,7 +248,7 @@ test("ImageMagick is primary animated decoder", () => {
 test("local ONNX vision is integrated", () => {
     assert(source.includes('require("./localNsfwVision")'));
     assert(source.includes("inspectFrames(frames"));
-    assert(source.includes("sticker-nsfw-v6-local-vision"));
+    assert(source.includes("sticker-nsfw-v6-fast-background"));
 });
 
 test("indeterminate result is not cached", () => {
@@ -258,4 +259,24 @@ test("indeterminate result is not cached", () => {
 test("fromMe sticker scanning stays enabled", () => {
     assert(!source.includes('if (msg?.key?.fromMe) return { inspected: false, reason: "from-me" }'));
     assert(source.includes("scanFromMe"));
+});
+
+
+test("automatic scans use fast background mode", () => {
+    const indexSource = fs.readFileSync(path.join(ROOT, "index.js"), "utf8");
+    assert(indexSource.includes("stickerSafetyGuardBackground"));
+    assert(indexSource.includes("fastMode: true"));
+    assert(indexSource.includes("if (isStickerMediaMessage) return"));
+});
+
+test("automatic sticker OCR duplicate is off by default", () => {
+    const source = fs.readFileSync(path.join(ROOT, "modules", "stickerSafetyGuard.js"), "utf8");
+    assert(source.includes("STICKER_SAFETY_AUTO_TEXT_OCR, false"));
+    assert(source.includes("!fastMode || runtime.autoTextOcr"));
+});
+
+test("fast local vision can skip NSFWJS fallback", () => {
+    const source = fs.readFileSync(path.join(ROOT, "modules", "stickerSafetyGuard.js"), "utf8");
+    assert(source.includes("local-vision-fast-clean"));
+    assert(source.includes("STICKER_SAFETY_AUTO_NSFWJS_FALLBACK, false"));
 });

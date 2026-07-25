@@ -3502,18 +3502,30 @@ async function startBot() {
         }))
         if (stickerSafetyCommandHandled) return
 
-        const stickerSafetyResult = await routerTrace.run(msg, traceContext, "stickerSafetyGuard", () => stickerSafetyGuard.handleStickerSafety(sock, msg, {
-            from,
-            sender: senderJid,
-            senderJid,
-            text,
-            isGroup,
-            canControlOwner,
-            isOwner,
-            groupRemoteControl,
-            lidAliasStore,
-        }))
-        if (stickerSafetyResult?.warned) return
+        const isStickerMediaMessage = Boolean(stickerSafetyGuard.isStickerMessage?.(msg))
+        let backgroundStickerSafetyPromise = null
+        if (isStickerMediaMessage) {
+            // Moderasi visual/OCR adalah pekerjaan berat. Jalankan di background agar
+            // router utama tidak menahan command atau pesan lain selama puluhan detik.
+            backgroundStickerSafetyPromise = routerTrace.run(msg, traceContext, "stickerSafetyGuardBackground", () => stickerSafetyGuard.handleStickerSafety(sock, msg, {
+                from,
+                sender: senderJid,
+                senderJid,
+                text,
+                isGroup,
+                canControlOwner,
+                isOwner,
+                groupRemoteControl,
+                lidAliasStore,
+                fastMode: true,
+            }))
+            Promise.resolve(backgroundStickerSafetyPromise).catch(error => {
+                console.log("[STICKER MODERATION] background safety error", {
+                    id: msg?.key?.id,
+                    error: String(error?.message || error).slice(0, 240),
+                })
+            })
+        }
 
         const antiToxicControlHandled = !isGroup && await routerTrace.run(msg, traceContext, "antiToxicControl", () => antiToxicControl.handleAntiToxicControlCommand(sock, msg, {
             from,
@@ -3622,18 +3634,48 @@ async function startBot() {
                 messageTypes: getMessageTypeKeys(msg),
             })
 
-            toxicHandled = await routerTrace.run(msg, traceContext, "antiToxic", () => antiToxic.handleToxicCheck(msg, sock, getOwnerControlJid(), {
+            const runAntiToxicCheck = () => routerTrace.run(msg, traceContext, isStickerMediaMessage ? "antiToxicStickerBackground" : "antiToxic", () => antiToxic.handleToxicCheck(msg, sock, getOwnerControlJid(), {
                 groupPrivateReply: isGroup && groupRemoteControl.isGroupAntiToxicPrivateReplyEnabled(from),
             }))
 
-            debugAntiToxicPipeline("after-handle-toxic-check", {
-                id: msg?.key?.id,
-                from,
-                senderJid,
-                toxicHandled,
-            })
+            if (isStickerMediaMessage) {
+                // Jalankan OCR tulisan stiker setelah pemindai visual selesai supaya dua
+                // engine berat tidak berebut CPU pada saat yang sama. Hasil warning tetap
+                // dikirim, tetapi pemrosesan pesan utama langsung dilepas.
+                const moderationChain = Promise.resolve(backgroundStickerSafetyPromise)
+                    .catch(() => null)
+                    .then(runAntiToxicCheck)
+                    .then(result => {
+                        debugAntiToxicPipeline("after-handle-toxic-check-background", {
+                            id: msg?.key?.id,
+                            from,
+                            senderJid,
+                            toxicHandled: result,
+                        })
+                        return result
+                    })
+                    .catch(error => {
+                        console.log("[ANTI-TOXIC PIPELINE] sticker background error", {
+                            id: msg?.key?.id,
+                            error: String(error?.message || error).slice(0, 240),
+                        })
+                    })
+                void moderationChain
+            } else {
+                toxicHandled = await runAntiToxicCheck()
+
+                debugAntiToxicPipeline("after-handle-toxic-check", {
+                    id: msg?.key?.id,
+                    from,
+                    senderJid,
+                    toxicHandled,
+                })
+            }
         }
 
+        // Sticker sudah masuk jalur moderasi background. Jangan teruskan ke router
+        // command/download lain yang tidak relevan.
+        if (isStickerMediaMessage) return
         if (toxicHandled) return
 
         const rateLimitCommandHandled = await routerTrace.run(msg, traceContext, "commandRateLimiterCommand", () => commandRateLimiter.handleRateLimitCommand(sock, msg, {

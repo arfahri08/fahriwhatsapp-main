@@ -6,7 +6,7 @@ const os = require("os")
 const path = require("path")
 const { execFile, spawnSync } = require("child_process")
 
-const PIPELINE_VERSION = "anti-toxic-sticker-ocr-v3"
+const PIPELINE_VERSION = "anti-toxic-sticker-ocr-v4-fast"
 const resultCache = new Map()
 const inFlightScans = new Map()
 const scanQueue = []
@@ -25,7 +25,9 @@ let workerResetPromise = null
 let workerStatus = "LAZY"
 let workerError = ""
 let ffmpegProbe = null
+let imageMagickProbe = null
 let tesseractCliProbe = null
+const failureLogTimes = new Map()
 let pngjsModule = null
 let pngjsLoadAttempted = false
 let pngjsLoadError = ""
@@ -57,19 +59,23 @@ function getRuntimeConfig() {
             ? parseBool(process.env.ANTI_TOXIC_STICKER_OCR_DEBUG, false)
             : debugOverride,
         maxBytes: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MAX_BYTES, 3 * 1024 * 1024, 1024),
-        maxCandidates: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MAX_CANDIDATES, 12, 8, 24),
-        maxFrames: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MAX_FRAMES, 5, 1, 8),
-        timeoutMs: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_TIMEOUT_MS, 45000, 30000, 120000),
+        maxCandidates: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MAX_CANDIDATES, 6, 2, 12),
+        maxFrames: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MAX_FRAMES, 3, 1, 5),
+        timeoutMs: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_TIMEOUT_MS, 15000, 5000, 45000),
         cacheLimit: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_CACHE_LIMIT, 300, 1, 2000),
         cacheTtlMs: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_CACHE_TTL_MS, 24 * 60 * 60 * 1000, 1000),
-        errorCacheTtlMs: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_ERROR_CACHE_TTL_MS, 60 * 1000, 1000),
-        queueMax: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_QUEUE_MAX, 4, 1, 20),
+        errorCacheTtlMs: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_ERROR_CACHE_TTL_MS, 10 * 60 * 1000, 1000),
+        queueMax: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_QUEUE_MAX, 2, 1, 8),
         concurrency: 1,
         ffmpegBin: String(process.env.FFMPEG_BIN || process.env.FFMPEG_PATH || "ffmpeg").trim() || "ffmpeg",
         ffprobeBin: String(process.env.FFPROBE_BIN || "ffprobe").trim() || "ffprobe",
+        imageMagickBin: String(process.env.ANTI_TOXIC_STICKER_OCR_MAGICK_BIN || process.env.IMAGEMAGICK_BIN || process.env.MAGICK_BIN || "magick").trim() || "magick",
+        imageMagickTimeoutMs: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MAGICK_TIMEOUT_MS, 12000, 3000, 30000),
+        imageMagickMaxSourceFrames: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MAGICK_MAX_SOURCE_FRAMES, 160, 10, 500),
+        animatedFfmpegFallback: parseBool(process.env.ANTI_TOXIC_STICKER_OCR_ANIMATED_FFMPEG_FALLBACK, false),
         mediumConfidence: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MEDIUM_CONFIDENCE, 25, 1, 100),
         exactShortConfidence: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_EXACT_SHORT_CONFIDENCE, 10, 0, 100),
-        maxPasses: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MAX_PASSES, 14, 1, 40),
+        maxPasses: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MAX_PASSES, 6, 1, 16),
         pngjsEnabled: parseBool(process.env.ANTI_TOXIC_STICKER_OCR_PNGJS, true),
         cliEnabled: parseBool(process.env.ANTI_TOXIC_STICKER_OCR_CLI_FALLBACK, true),
         tesseractBin: String(process.env.TESSERACT_BIN || "tesseract").trim() || "tesseract",
@@ -106,7 +112,17 @@ function debugLog(message, details = {}) {
 }
 
 function logFailure(error) {
-    console.log(`[ANTI TOXIC OCR] Failed: ${shortError(error)}`)
+    const code = String(error?.code || "ocr_error")
+    const summary = shortError(error)
+    const key = `${code}:${summary.slice(0, 120)}`
+    const now = Date.now()
+    const last = Number(failureLogTimes.get(key) || 0)
+    if (now - last < 60 * 1000) {
+        debugLog("failure suppressed", { code, error: summary })
+        return
+    }
+    failureLogTimes.set(key, now)
+    console.log(`[ANTI TOXIC OCR] scan skipped (${code}): ${summary}`)
 }
 
 function unwrapMessage(message) {
@@ -193,6 +209,7 @@ async function downloadStickerBuffer(stickerMessage, options = {}) {
 }
 
 function getSharp(options = {}) {
+    if (options.disableSharp === true) return null
     if (options.sharp) return options.sharp
     if (sharpLoadAttempted) return sharpModule
     sharpLoadAttempted = true
@@ -430,6 +447,74 @@ function execFileWithTimeout(command, args, timeoutMs, missingCode = "ffmpeg_mis
     })
 }
 
+function resolveImageMagickCommand(force = false) {
+    if (imageMagickProbe && !force) return imageMagickProbe
+    const config = getRuntimeConfig()
+    const candidates = [...new Set([config.imageMagickBin, "magick", "convert"].filter(Boolean))]
+    for (const command of candidates) {
+        try {
+            const result = spawnSync(command, ["-version"], {
+                encoding: "utf8",
+                timeout: 3000,
+                windowsHide: true,
+                stdio: ["ignore", "pipe", "pipe"],
+            })
+            if (result.status === 0) {
+                imageMagickProbe = { ready: true, detail: `READY (${command})`, command }
+                return imageMagickProbe
+            }
+        } catch {}
+    }
+    imageMagickProbe = { ready: false, detail: "NOT FOUND", command: "" }
+    return imageMagickProbe
+}
+
+async function extractFramesWithImageMagick(buffer, stickerMessage, config) {
+    const probe = resolveImageMagickCommand()
+    if (!probe.ready) throw makeOcrError("imagemagick_missing", "ImageMagick command tidak ditemukan")
+
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "anti-toxic-magick-"))
+    const inputPath = path.join(tempRoot, "sticker.webp")
+    const outputPattern = path.join(tempRoot, "frame-%04d.png")
+    try {
+        fs.writeFileSync(inputPath, buffer)
+        await execFileWithTimeout(probe.command, [
+            inputPath,
+            "-coalesce",
+            "+adjoin",
+            outputPattern,
+        ], config.imageMagickTimeoutMs, "imagemagick_missing")
+
+        const files = fs.readdirSync(tempRoot)
+            .filter(name => /^frame-\d+\.png$/i.test(name))
+            .sort()
+        if (!files.length) throw makeOcrError("conversion_failed", "ImageMagick tidak menghasilkan frame")
+        if (files.length > config.imageMagickMaxSourceFrames) {
+            throw makeOcrError("too_many_frames", `animated sticker memiliki ${files.length} frame`)
+        }
+
+        const indexes = pickFrameIndexes(files.length, config.maxFrames)
+        const frames = indexes.map(frameIndex => ({
+            buffer: fs.readFileSync(path.join(tempRoot, files[frameIndex])),
+            frameIndex,
+            pageCount: files.length,
+            source: "imagemagick",
+        }))
+        return {
+            frames,
+            animated: Boolean(stickerMessage?.isAnimated || files.length > 1),
+            source: "imagemagick",
+            sourceFrameCount: files.length,
+        }
+    } finally {
+        try {
+            const resolved = path.resolve(tempRoot)
+            const base = path.resolve(os.tmpdir())
+            if (resolved.startsWith(base + path.sep)) fs.rmSync(resolved, { recursive: true, force: true })
+        } catch {}
+    }
+}
+
 async function extractFramesWithFfmpeg(buffer, stickerMessage, config) {
     const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "anti-toxic-ocr-"))
     const inputPath = path.join(tempRoot, "sticker.webp")
@@ -495,39 +580,53 @@ async function extractFramesWithFfmpeg(buffer, stickerMessage, config) {
 async function extractAnimatedStickerFrames(buffer, stickerMessage = {}, options = {}) {
     if (!Buffer.isBuffer(buffer) || !buffer.length) throw makeOcrError("unsupported_media", "buffer sticker kosong")
     const config = { ...getRuntimeConfig(), ...options }
+    const animatedHint = Boolean(stickerMessage?.isAnimated)
     const sharp = getSharp(options)
-    if (!sharp) return extractFramesWithFfmpeg(buffer, stickerMessage, config)
+    let sharpError = null
+
+    if (sharp) {
+        try {
+            let metadata
+            try {
+                metadata = await sharp(buffer, { animated: true, pages: -1 }).metadata()
+            } catch {
+                metadata = await sharp(buffer, { animated: false }).metadata()
+            }
+            const pageCount = Math.max(1, Number(metadata?.pages || 1))
+            const animated = Boolean(animatedHint || pageCount > 1)
+            const indexes = pickFrameIndexes(pageCount, animated ? config.maxFrames : 1)
+            const frames = []
+            for (const frameIndex of indexes) {
+                let rendered
+                try {
+                    rendered = await sharp(buffer, {
+                        animated: pageCount > 1,
+                        page: frameIndex,
+                        pages: 1,
+                    }).png().toBuffer()
+                } catch {
+                    rendered = await sharp(buffer, { animated: false }).png().toBuffer()
+                }
+                if (rendered?.length) frames.push({ buffer: rendered, frameIndex, pageCount, source: "sharp" })
+            }
+            if (frames.length) return { frames, animated, source: "sharp", sourceFrameCount: pageCount }
+            throw makeOcrError("conversion_failed", "sharp tidak menghasilkan frame")
+        } catch (error) {
+            sharpError = error
+            debugLog("sharp frame extraction failed", { error: shortError(error) })
+        }
+    }
 
     try {
-        let metadata
-        try {
-            metadata = await sharp(buffer, { animated: true, pages: -1 }).metadata()
-        } catch {
-            metadata = await sharp(buffer, { animated: false }).metadata()
+        return await extractFramesWithImageMagick(buffer, stickerMessage, config)
+    } catch (magickError) {
+        debugLog("ImageMagick frame extraction failed", { error: shortError(magickError) })
+        if (animatedHint && !config.animatedFfmpegFallback) {
+            throw makeOcrError(
+                magickError.code || "animated_decoder_unavailable",
+                `animated decoder gagal: ${shortError(magickError || sharpError)}`
+            )
         }
-        const pageCount = Math.max(1, Number(metadata?.pages || 1))
-        const animated = Boolean(stickerMessage?.isAnimated || pageCount > 1)
-        const indexes = pickFrameIndexes(pageCount, animated ? config.maxFrames : 1)
-        const frames = []
-        for (const frameIndex of indexes) {
-            let rendered
-            try {
-                rendered = await sharp(buffer, {
-                    animated: pageCount > 1,
-                    page: frameIndex,
-                    pages: 1,
-                }).png().toBuffer()
-            } catch {
-                rendered = await sharp(buffer, { animated: false }).png().toBuffer()
-            }
-            if (rendered?.length) {
-                frames.push({ buffer: rendered, frameIndex, pageCount, source: "sharp" })
-            }
-        }
-        if (!frames.length) throw makeOcrError("conversion_failed", "sharp tidak menghasilkan frame")
-        return { frames, animated, source: "sharp" }
-    } catch (error) {
-        debugLog("sharp frame extraction failed", { error: shortError(error) })
         try {
             return await extractFramesWithFfmpeg(buffer, stickerMessage, config)
         } catch (fallbackError) {
@@ -1316,18 +1415,20 @@ function getAntiToxicStickerOcrHealth(options = {}) {
         getTesseract()
         getPngJs()
         probeFfmpeg()
+        resolveImageMagickCommand()
         probeTesseractCli()
     }
     const tesseractInstalled = dependencyResolvable("tesseract.js") && !tesseractLoadError
     const sharpInstalled = dependencyResolvable("sharp")
     const pngjsInstalled = dependencyResolvable("pngjs") && !pngjsLoadError
     const ffmpeg = ffmpegProbe || { ready: false, detail: "NOT CHECKED" }
+    const imageMagick = imageMagickProbe || { ready: false, detail: "NOT CHECKED" }
     const cli = tesseractCliProbe || { ready: false, detail: "NOT CHECKED" }
-    const imageEngineReady = Boolean(pngjsInstalled || sharpModule || (!sharpLoadAttempted && sharpInstalled) || ffmpeg.ready)
+    const imageEngineReady = Boolean(pngjsInstalled || sharpModule || (!sharpLoadAttempted && sharpInstalled) || imageMagick.ready || ffmpeg.ready)
     const words = Array.isArray(options.toxicWords) ? options.toxicWords : []
     const normalizedWords = words.map(normalizeWordlistEntry)
     const staticStatus = config.enabled && tesseractInstalled && imageEngineReady ? "READY" : "DEGRADED"
-    const animatedStatus = staticStatus === "READY" && (sharpModule || ffmpeg.ready) ? "READY" : "DEGRADED"
+    const animatedStatus = staticStatus === "READY" && (sharpModule || imageMagick.ready || config.animatedFfmpegFallback && ffmpeg.ready) ? "READY" : "DEGRADED"
     let engine = "READY"
     if (!config.enabled) engine = "OFF"
     else if (!tesseractInstalled || workerStatus === "ERROR") engine = "ERROR"
@@ -1344,6 +1445,7 @@ function getAntiToxicStickerOcrHealth(options = {}) {
         tesseractCli: cli.detail,
         pngjs: pngjsInstalled ? "READY" : `ERROR${pngjsLoadError ? ` (${pngjsLoadError})` : ""}`,
         sharp: sharpModule ? "READY" : sharpLoadAttempted ? `FALLBACK${sharpLoadError ? ` (${sharpLoadError})` : ""}` : sharpInstalled ? "LAZY" : "FALLBACK",
+        imageMagick: imageMagick.detail,
         ffmpeg: ffmpeg.detail,
         staticSticker: staticStatus,
         animatedSticker: animatedStatus,
@@ -1396,7 +1498,8 @@ function getStatusText(health) {
         `Tesseract CLI: ${health.tesseractCli}`,
         `PNGJS Preprocess: ${health.pngjs}`,
         `Sharp: ${health.sharp}`,
-        `FFmpeg: ${health.ffmpeg}`,
+        `ImageMagick: ${health.imageMagick}`,
+        `FFmpeg fallback: ${health.ffmpeg}`,
         `Static Sticker: ${health.staticSticker}`,
         `Animated Sticker: ${health.animatedSticker}`,
         "",
@@ -1533,6 +1636,8 @@ async function disposeAntiToxicStickerOcr() {
         })
     }
     debugOverride = null
+    imageMagickProbe = null
+    failureLogTimes.clear()
     await resetWorker()
     return true
 }

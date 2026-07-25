@@ -50,7 +50,7 @@ const recentMessageIds = new Map();
 const recentStickerHashes = new Map();
 const MESSAGE_DEDUPE_TTL_MS = 2 * 60 * 1000;
 const HASH_DEDUPE_TTL_MS = 30 * 1000;
-const NSFW_PIPELINE_VERSION = "sticker-nsfw-v6-local-vision";
+const NSFW_PIPELINE_VERSION = "sticker-nsfw-v6-fast-background";
 
 let stateCache = null;
 let wordCache = null;
@@ -100,6 +100,11 @@ function getRuntimeConfig() {
     const sexyThreshold = clampProbability(process.env.STICKER_NSFW_SEXY_THRESHOLD, 0.72);
     return {
         maxFrames: Math.max(1, Math.min(12, Math.floor(parseNumber(process.env.STICKER_SAFETY_MAX_FRAMES, 9)))),
+        autoMaxFrames: Math.max(2, Math.min(6, Math.floor(parseNumber(process.env.STICKER_SAFETY_AUTO_MAX_FRAMES, 4)))),
+        autoTimeoutMs: Math.max(10000, parseNumber(process.env.STICKER_SAFETY_AUTO_TIMEOUT_MS, 30000)),
+        autoTextOcr: parseBool(process.env.STICKER_SAFETY_AUTO_TEXT_OCR, false),
+        autoNsfwJsFallback: parseBool(process.env.STICKER_SAFETY_AUTO_NSFWJS_FALLBACK, false),
+        autoNsfwJsFrames: Math.max(1, Math.min(3, Math.floor(parseNumber(process.env.STICKER_SAFETY_AUTO_NSFWJS_FRAMES, 2)))),
         maxFileBytes: Math.max(1, parseNumber(process.env.STICKER_SAFETY_MAX_FILE_MB, 8) * 1024 * 1024),
         ffmpegTimeoutMs: Math.max(1000, parseNumber(process.env.STICKER_SAFETY_FFMPEG_TIMEOUT_MS, 25000)),
         ffmpegBin: String(process.env.FFMPEG_BIN || process.env.FFMPEG_PATH || "ffmpeg").trim() || "ffmpeg",
@@ -1415,6 +1420,7 @@ function rankSuspiciousFrames(frameResults = []) {
 async function inspectStickerNsfw(frames, options = {}) {
     const startedAt = Date.now();
     const config = getRuntimeConfig();
+    const fastMode = options.fastMode === true;
     const result = {
         available: true,
         frames: [],
@@ -1429,6 +1435,7 @@ async function inspectStickerNsfw(frames, options = {}) {
         reason: "",
         pipelineVersion: NSFW_PIPELINE_VERSION,
         localVision: null,
+        fastMode,
         error: "",
     };
 
@@ -1437,7 +1444,7 @@ async function inspectStickerNsfw(frames, options = {}) {
         if (config.localVisionEnabled) {
             try {
                 result.localVision = await getLocalNsfwVision().inspectFrames(frames, {
-                    maxFrames: config.maxFrames,
+                    maxFrames: fastMode ? config.autoMaxFrames : config.maxFrames,
                 });
                 if (result.localVision?.violation) {
                     localDecision = {
@@ -1453,6 +1460,16 @@ async function inspectStickerNsfw(frames, options = {}) {
                         predictions: {},
                         reason: result.localVision.reason || "local-vision-violation",
                     };
+                } else if (fastMode && result.localVision?.available && !config.autoNsfwJsFallback) {
+                    localDecision = {
+                        violation: false,
+                        category: null,
+                        confidence: Number(result.localVision.confidence || 0),
+                        frameIndex: 0,
+                        region: "local-vision",
+                        predictions: {},
+                        reason: "local-vision-fast-clean",
+                    };
                 }
             } catch (error) {
                 result.localVision = {
@@ -1465,9 +1482,14 @@ async function inspectStickerNsfw(frames, options = {}) {
         }
 
         if (!localDecision) {
-            for (let index = 0; index < (frames || []).length; index += 1) {
+            let classifierFrames = frames || [];
+            if (fastMode && classifierFrames.length > config.autoNsfwJsFrames) {
+                const indexes = buildEvenSampleIndices(classifierFrames.length, config.autoNsfwJsFrames);
+                classifierFrames = indexes.map(index => classifierFrames[index]).filter(Boolean);
+            }
+            for (let index = 0; index < classifierFrames.length; index += 1) {
                 try {
-                    result.frames.push(await classifyNsfwFrame(frames[index], index, "full"));
+                    result.frames.push(await classifyNsfwFrame(classifierFrames[index], index, "full"));
                     result.primaryFrames += 1;
                 } catch (error) {
                     console.log(`[STICKER SAFETY] NSFW primary frame failed: ${shortError(error)}`);
@@ -1475,7 +1497,7 @@ async function inspectStickerNsfw(frames, options = {}) {
             }
 
             let decision = evaluateNsfwPredictions(result.frames, options);
-            if (!decision.violation) {
+            if (!decision.violation && !fastMode) {
                 const rankedFrames = rankSuspiciousFrames(result.frames);
                 let suspiciousFrames = rankedFrames
                     .filter(item => item.score >= config.nsfwCropTriggerThreshold)
@@ -1515,7 +1537,7 @@ async function inspectStickerNsfw(frames, options = {}) {
                 decision = evaluateNsfwPredictions(result.frames, options);
             }
 
-            if (!decision.violation) {
+            if (!decision.violation && !fastMode) {
                 const exposureDecision = evaluateExposureHeuristics(result.frames, frames, options);
                 if (exposureDecision?.violation) decision = exposureDecision;
             }
@@ -1565,10 +1587,13 @@ async function inspectStickerNsfw(frames, options = {}) {
 }
 
 async function warmupNsfwModel() {
-    const tasks = [getNsfwModel()];
+    const tasks = [];
     try {
         tasks.push(getLocalNsfwVision().warmup());
     } catch {}
+    if (parseBool(process.env.STICKER_SAFETY_WARMUP_NSFWJS, false)) {
+        tasks.push(getNsfwModel());
+    }
     await Promise.allSettled(tasks);
     return getStickerSafetyHealth();
 }
@@ -1589,10 +1614,12 @@ async function inspectSticker(sock, msg, options = {}) {
 
     const effective = options.config || getEffectiveConfig(msg?.key?.remoteJid, options);
     const runtime = getRuntimeConfig();
+    const fastMode = options.fastMode === true;
+    const scanRuntime = fastMode ? { ...runtime, maxFrames: runtime.autoMaxFrames } : runtime;
     let frameSet = null;
 
     try {
-        const buffer = options.buffer || await downloadStickerBuffer(stickerMessage, { timeoutMs: runtime.timeoutMs });
+        const buffer = options.buffer || await downloadStickerBuffer(stickerMessage, { timeoutMs: fastMode ? runtime.autoTimeoutMs : runtime.timeoutMs });
         if (!buffer?.length) return { inspected: false, reason: "empty-buffer" };
         if (buffer.length > runtime.maxFileBytes) {
             console.log("[STICKER SAFETY] sticker dilewati karena terlalu besar", {
@@ -1614,12 +1641,12 @@ async function inspectSticker(sock, msg, options = {}) {
             };
         }
 
-        frameSet = await extractStickerFrames(buffer, stickerMessage, runtime);
+        frameSet = await extractStickerFrames(buffer, stickerMessage, scanRuntime);
         const frames = frameSet.frames || [];
 
         const [ocr, nsfw] = await Promise.all([
-            effective.textEnabled
-                ? inspectStickerText(frames, runtime).catch(error => ({
+            effective.textEnabled && (!fastMode || runtime.autoTextOcr)
+                ? inspectStickerText(frames, scanRuntime).catch(error => ({
                     available: false,
                     error: shortError(error),
                     badWords: [],
@@ -1627,7 +1654,7 @@ async function inspectSticker(sock, msg, options = {}) {
                 }))
                 : Promise.resolve({ available: false, disabled: true, badWords: [], text: "" }),
             effective.nsfwEnabled
-                ? inspectStickerNsfw(frames, { isStatic: frameSet.type === "static" }).catch(error => ({
+                ? inspectStickerNsfw(frames, { isStatic: frameSet.type === "static", fastMode }).catch(error => ({
                     available: false,
                     error: shortError(error),
                     violation: false,
@@ -1651,6 +1678,7 @@ async function inspectSticker(sock, msg, options = {}) {
             ocr,
             nsfw,
             indeterminate,
+            fastMode,
             violation: Boolean(violationType),
             violationType,
         };
@@ -1737,7 +1765,7 @@ function runQueue() {
     while (activeJobs < config.concurrency && queue.length) {
         const item = queue.shift();
         activeJobs += 1;
-        withTimeout(Promise.resolve().then(item.job), config.timeoutMs, "Sticker Safety job")
+        withTimeout(Promise.resolve().then(item.job), Number(item.options?.timeoutMs || config.timeoutMs), "Sticker Safety job")
             .then(result => item.resolve(result))
             .catch(error => {
                 console.log(`[STICKER SAFETY] job error: ${shortError(error)}`);
@@ -1829,10 +1857,12 @@ async function handleStickerSafety(sock, msg, context = {}) {
     if (messageId && recentMessageIds.has(messageId)) return { inspected: false, reason: "duplicate-message" };
     if (messageId) recentMessageIds.set(messageId, Date.now());
 
+    const runtime = getRuntimeConfig();
     return enqueueStickerJob(async () => {
         const result = await inspectSticker(sock, msg, {
             ...context,
             config: effective,
+            fastMode: context.fastMode !== false,
         });
         if (result.hash) {
             if (recentStickerHashes.has(result.hash) && result.fromCache && !result.violation) {
@@ -1847,7 +1877,7 @@ async function handleStickerSafety(sock, msg, context = {}) {
         await sendStickerWarning(sock, msg, result, context);
         await maybeDeleteSticker(sock, msg, result);
         return { ...result, warned: true };
-    });
+    }, { timeoutMs: context.fastMode === false ? runtime.timeoutMs : runtime.autoTimeoutMs });
 }
 
 function getContextInfo(msg) {
@@ -1954,7 +1984,9 @@ function formatStatus(groupJid = "", context = {}) {
         `ONNX Runtime: ${health.localVision?.onnxRuntime || "-"}`,
         `NudeNet: ${health.localVision?.nudeNet || "-"} / model ${health.localVision?.nudeNetModel || "-"}`,
         `ViT NSFW: ${health.localVision?.vit || "-"} / model ${health.localVision?.vitModel || "-"}`,
-        `Frame Sampling: ${health.maxFrames} evenly distributed`,
+        `Manual Frame Sampling: ${health.maxFrames} evenly distributed`,
+        `Automatic Fast Frames: ${health.autoMaxFrames}`,
+        `Automatic OCR duplicate: ${health.autoTextOcr ? "ON" : "OFF"}`,
         `Crop Regions: up to ${health.maxRegions}`,
         `Queue: ${health.queue}`,
         `Cache: ${health.cache}`,
@@ -2295,6 +2327,9 @@ function getStickerSafetyHealth() {
         imageMagick: imageMagickStatus === "READY" && imageMagickDetail ? `READY (${imageMagickDetail})` : imageMagickStatus,
         localVision: localVisionHealth,
         maxFrames: runtime.maxFrames,
+        autoMaxFrames: runtime.autoMaxFrames,
+        autoTextOcr: runtime.autoTextOcr,
+        autoTimeoutMs: runtime.autoTimeoutMs,
         maxRegions: runtime.nsfwMaxRegions,
         thresholds: {
             porn: runtime.nsfwPornThreshold,
