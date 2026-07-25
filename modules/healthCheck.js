@@ -82,6 +82,7 @@ async function buildHealthText(services = {}) {
     const sticker = safeCall(() => services.stickerSafetyGuard?.getStickerSafetyHealth?.(), null)
     const scheduler = safeCall(() => services.broadcastSchedulerStatus?.(), null)
     const schedules = safeCall(() => services.bcscheduler?.getStatus?.(), null)
+    const notification = safeCall(() => services.botNotificationTarget?.getBotNotificationHealth?.(), null)
 
     const ytDlp = process.env.YTDLP_BIN || "yt-dlp"
     const ffmpeg = process.env.FFMPEG_BIN || process.env.FFMPEG_PATH || "ffmpeg"
@@ -100,6 +101,16 @@ async function buildHealthText(services = {}) {
         `Group Auto Reply: ${auto.groupChat}`,
         `Auto Reply Forwarder: ${auto.forwarder}`,
         `Keyword Auto Reply: ${auto.keyword}`,
+        "",
+        `Bot Notification Target: ${notification?.targetJid || "120363424006225997@g.us"}`,
+        `Active Notification: ${notification?.activeNotification || "GROUP ONLY"}`,
+        `Restart Notification: ${notification?.restartNotification || "GROUP ONLY"}`,
+        `Reconnect Notification: ${notification?.reconnectNotification || "GROUP ONLY"}`,
+        `Auto Reply Forwarder Target: ${notification?.autoReplyForwarder || "GROUP ONLY"}`,
+        `Private Owner Notification: ${notification?.privateOwnerNotification || "OFF"}`,
+        `PM Fallback: ${notification?.pmFallback || "OFF"}`,
+        `Last Notification: ${formatTime(notification?.lastNotificationAt)}`,
+        `Last Notification Result: ${notification?.lastNotificationResult || "UNKNOWN"}`,
         "",
         `Group Inbound Policy: ${policy?.mode || "ANTI TOXIC ONLY"}`,
         "Group Detect Link: OFF",

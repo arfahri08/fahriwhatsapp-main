@@ -37,6 +37,7 @@ const spotifyDownloader = require("./modules/spotifyDownloader")
 const legacyDownloader = require("./modules/downloader")
 const mediaCleanupManager = require("./modules/mediaCleanupManager")
 const activeNotifier = require("./modules/activeNotifier")
+const botNotificationTarget = require("./modules/botNotificationTarget")
 const messageCleaner = require("./modules/messageCleaner")
 const statusPanel = require("./modules/statusPanel")
 const statusDownloader = require("./modules/statusDownloader")
@@ -170,6 +171,10 @@ function shouldSilencePrivateOnlyCommandInGroup(text, isGroup) {
         || lower === ".bcaction"
         || lower === ".healthreact"
         || lower.startsWith(".healthreact ")
+        || lower === ".notifytarget"
+        || lower.startsWith(".notifytarget ")
+        || lower === ".botnotify"
+        || lower.startsWith(".botnotify ")
 }
 
 const legacyDownloaderCommandSessions = new Map()
@@ -2625,6 +2630,11 @@ async function showHelpAfterRestart(sock) {
 
     console.log("[RESTART] Pesan restart diedit menjadi notifikasi aktif.")
 
+    // Grup notification menyimpan status aktif sebagai log permanen; jangan ubah menjadi help menu.
+    if (botNotificationTarget.isBotNotificationGroup(notice.jid)) {
+        return
+    }
+
     if (!shouldEditActiveNoticeToHelp()) {
         return
     }
@@ -2654,19 +2664,8 @@ async function showHelpAfterRestart(sock) {
     }
 }
 
-function getRestartReplyJid(from) {
-    if (!from || isBroadcastJid(from) || isNewsletterJid(from)) return getOwnerControlJid()
-    if (isGroupJid(from)) {
-        const ownerJid = getOwnerControlJid()
-        console.log(`[RESTART] Command restart dari grup (${from}), notifikasi diarahkan ke owner: ${ownerJid || "-"}`)
-        return ownerJid || from
-    }
-    if (isLidJid(from)) {
-        const ownerJid = getOwnerControlJid()
-        console.log(`[RESTART] Remote JID berupa LID (${from}), balasan restart diarahkan ke owner: ${ownerJid || "-"}`)
-        return ownerJid || from
-    }
-    return from
+function getRestartReplyJid(_from) {
+    return botNotificationTarget.getBotNotificationGroupJid()
 }
 
 async function sendRestartNotice(sock, jid) {
@@ -2707,18 +2706,9 @@ async function sendRestartNotice(sock, jid) {
     return null
 }
 
-async function editRestartCommandToNotice(sock, msg, jid) {
-    const commandKey = msg?.key
-    if (!jid || !commandKey?.id || !commandKey.fromMe) {
-        return sendRestartNotice(sock, getRestartReplyJid(jid))
-    }
-
-    if (await editMessageText(sock, jid, commandKey, RESTART_WAIT_TEXT, "pesan command restart")) {
-        saveRestartNotice(jid, commandKey)
-        return { key: commandKey }
-    }
-
-    return sendRestartNotice(sock, getRestartReplyJid(jid))
+async function editRestartCommandToNotice(sock, _msg, _jid) {
+    // Notifikasi restart selalu dikirim ke grup notification, bukan diedit/dikirim ke PM owner.
+    return sendRestartNotice(sock, botNotificationTarget.getBotNotificationGroupJid())
 }
 
 async function startBot() {
@@ -3682,6 +3672,14 @@ async function startBot() {
         }));
         if (mediaCleanupHandled) return;
 
+        const botNotificationHandled = await routerTrace.run(msg, traceContext, "botNotificationTarget", () => botNotificationTarget.handleBotNotificationCommand(sock, msg, {
+            from,
+            text,
+            isGroup,
+            isOwner: canControlOwner,
+        }))
+        if (botNotificationHandled) return
+
         const healthHandled = await routerTrace.run(msg, traceContext, "healthCheck", () => healthCheck.handleHealthCommand(sock, msg, {
             from,
             text,
@@ -3697,6 +3695,7 @@ async function startBot() {
             stickerSafetyGuard,
             securityMediaLog,
             messageEditGuardian,
+            botNotificationTarget,
             bcscheduler,
             broadcastSchedulerStatus: getBroadcastSchedulerRuntimeStatus,
         }))
@@ -3762,6 +3761,7 @@ async function startBot() {
                     stickerSafetyGuard,
                     securityMediaLog,
                     messageEditGuardian,
+                    botNotificationTarget,
                 },
             },
         }))

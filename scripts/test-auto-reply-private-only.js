@@ -17,6 +17,7 @@ const replyCommands = require("../modules/replyCommands")
 const PRIVATE_JID = "628111111111@s.whatsapp.net"
 const GROUP_JID = "120363000000000000@g.us"
 const OWNER_JID = "6288287764273@s.whatsapp.net"
+const NOTIFICATION_GROUP_JID = "120363424006225997@g.us"
 
 function message(remoteJid, content, key = {}) {
     return {
@@ -179,7 +180,8 @@ test("15. private Forwarder bekerja sesuai config", async () => {
     })
     assert.ok(result)
     assert.ok(sent.some(item => item.jid === PRIVATE_JID))
-    assert.ok(sent.some(item => item.jid === OWNER_JID))
+    assert.ok(sent.some(item => item.jid === NOTIFICATION_GROUP_JID))
+    assert.ok(!sent.some(item => item.jid === OWNER_JID))
 })
 
 test("16. group Forwarder tidak meneruskan atau membalas", async () => {
@@ -241,7 +243,7 @@ test("22. random fallback hanya tersedia untuk private incoming", () => {
 test("23. help menjelaskan kebijakan Auto Reply dan group", () => {
     const text = help.generateHelpMenu()
     assert.ok(text.includes("Auto Reply hanya bekerja melalui private chat."))
-    assert.ok(text.includes("Pesan grup tidak diteruskan kepada owner oleh Auto Reply Forwarder."))
+    assert.ok(text.includes("Notifikasi Auto Reply Forwarder dikirim ke grup notification, bukan PM owner."))
     assert.ok(text.includes("Keyword Reply otomatis hanya bekerja di private chat."))
     assert.ok(text.includes("Untuk saat ini bot di grup hanya menjalankan Anti Kasar."))
 })
@@ -258,6 +260,9 @@ test("24. health menampilkan scope dan aman saat status gagal dibaca", async () 
         assert.ok(onText.includes("Private Auto Reply: ON"))
         assert.ok(onText.includes("Group Auto Reply: OFF"))
         assert.ok(onText.includes("Auto Reply Forwarder: PRIVATE ONLY"))
+        assert.ok(onText.includes("Bot Notification Target: 120363424006225997@g.us"))
+        assert.ok(onText.includes("Auto Reply Forwarder Target: GROUP ONLY"))
+        assert.ok(onText.includes("Private Owner Notification: OFF"))
         assert.ok(onText.includes("Keyword Auto Reply: PRIVATE ONLY"))
 
         const unknownText = await healthCheck.buildHealthText({ autoReply: { getStatus: () => { throw new Error("test") } } })
