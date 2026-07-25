@@ -62,7 +62,7 @@ function getReplyMessageForMessage(msg, excludedJids = [], override = null) {
     const status = String(state.customStatusText || "").trim()
     if (!status) return null
     return {
-        text: `Halo, saat ini Fahri ${status}. Pesanmu sudah diterima dan akan dibalas setelah tersedia.`,
+        text: `Halo, {name}! Saat ini Fahri ${status}. Pesanmu sudah diterima dan akan dibalas setelah tersedia.`,
     }
 }
 

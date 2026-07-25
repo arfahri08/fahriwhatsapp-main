@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "global": {
+    "enabled": true,
+    "ownerBypass": true,
+    "maxCommandsPerMinute": 5,
+    "chatMaxCommandsPerMinute": 30,
+    "warningCooldownMs": 30000,
+    "cooldowns": {
+      "command": 5000,
+      "downloader": 30000,
+      "media": 20000,
+      "ocr": 45000
+    }
+  },
+  "groups": {},
+  "updatedAt": 0,
+  "updatedBy": "system"
+}

@@ -64,6 +64,8 @@ function getScopeStatus() {
         scope: "PRIVATE ONLY",
         forwarder: enabled ? "PRIVATE ONLY" : "OFF",
         keywordReply: enabled ? "PRIVATE ONLY" : "OFF",
+        quotedBubble: process.env.AUTO_REPLY_QUOTED_BUBBLE !== "false",
+        personalName: process.env.AUTO_REPLY_PERSONAL_NAME !== "false",
     }
 }
 

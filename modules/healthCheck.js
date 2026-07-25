@@ -83,6 +83,8 @@ async function buildHealthText(services = {}) {
     const scheduler = safeCall(() => services.broadcastSchedulerStatus?.(), null)
     const schedules = safeCall(() => services.bcscheduler?.getStatus?.(), null)
     const notification = safeCall(() => services.botNotificationTarget?.getBotNotificationHealth?.(), null)
+    const autoPresentation = safeCall(() => services.autoReplyForwarder?.getAutoReplyPresentationHealth?.(), null)
+    const rateLimit = safeCall(() => services.commandRateLimiter?.getRateLimitHealth?.(), null)
 
     const ytDlp = process.env.YTDLP_BIN || "yt-dlp"
     const ffmpeg = process.env.FFMPEG_BIN || process.env.FFMPEG_PATH || "ffmpeg"
@@ -101,6 +103,17 @@ async function buildHealthText(services = {}) {
         `Group Auto Reply: ${auto.groupChat}`,
         `Auto Reply Forwarder: ${auto.forwarder}`,
         `Keyword Auto Reply: ${auto.keyword}`,
+        `Auto Reply Bubble: ${autoPresentation?.quotedBubble === false ? "OFF" : "QUOTED ON"}`,
+        `Auto Reply Personal Name: ${autoPresentation?.personalName === false ? "OFF" : "ON"}`,
+        "",
+        `Command Rate Limit: ${rateLimit ? yesNo(rateLimit.enabled) : "UNKNOWN"}`,
+        `Rate User Limit: ${rateLimit?.maxCommandsPerMinute ?? "-"}/menit`,
+        `Rate Chat Limit: ${rateLimit?.chatMaxCommandsPerMinute ?? "-"}/menit`,
+        `Rate Command Cooldown: ${rateLimit?.cooldowns?.command != null ? `${Math.ceil(rateLimit.cooldowns.command / 1000)} detik` : "-"}`,
+        `Rate Downloader Cooldown: ${rateLimit?.cooldowns?.downloader != null ? `${Math.ceil(rateLimit.cooldowns.downloader / 1000)} detik` : "-"}`,
+        `Rate Media Cooldown: ${rateLimit?.cooldowns?.media != null ? `${Math.ceil(rateLimit.cooldowns.media / 1000)} detik` : "-"}`,
+        `Rate OCR Cooldown: ${rateLimit?.cooldowns?.ocr != null ? `${Math.ceil(rateLimit.cooldowns.ocr / 1000)} detik` : "-"}`,
+        `Rate Blocked Runtime: ${rateLimit?.blocked ?? 0}`,
         "",
         `Bot Notification Target: ${notification?.targetJid || "120363424006225997@g.us"}`,
         `Active Notification: ${notification?.activeNotification || "GROUP ONLY"}`,

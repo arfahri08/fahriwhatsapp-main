@@ -18,6 +18,8 @@ function formatReplyStatus() {
         "Scope: PRIVATE ONLY",
         `Forward to Owner: ${status.forwarder}`,
         `Keyword Reply: ${status.keywordReply}`,
+        `Quoted Reply Bubble: ${status.quotedBubble ? "ON" : "OFF"}`,
+        `Personal Name: ${status.personalName ? "ON" : "OFF"}`,
     ].join("\n")
 }
 
@@ -36,7 +38,7 @@ async function handleReplyCommand(sock, remoteJid, text, context = {}) {
     } else if (lower === ".reply status") {
         await sock.sendMessage(remoteJid, { text: formatReplyStatus() })
     } else {
-        await sock.sendMessage(remoteJid, { text: "🤖 *Auto Reply*\n\n.reply on\n.reply off\n.reply status\n\nScope: PRIVATE ONLY" })
+        await sock.sendMessage(remoteJid, { text: "🤖 *Auto Reply*\n\n.reply on\n.reply off\n.reply status\n\nScope: PRIVATE ONLY\nReply Style: QUOTED BUBBLE + PERSONAL NAME" })
     }
     return true
 }

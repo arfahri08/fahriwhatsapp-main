@@ -27,6 +27,7 @@ function message(remoteJid, content, key = {}) {
             fromMe: Boolean(key.fromMe),
             ...(key.participant ? { participant: key.participant } : {}),
         },
+        ...(key.pushName ? { pushName: key.pushName } : {}),
         message: content,
     }
 }
@@ -170,16 +171,23 @@ test("14. private Custom Auto Reply bekerja", () => {
     }), null)
 })
 
-test("15. private Forwarder bekerja sesuai config", async () => {
+test("15. private Forwarder memakai quoted bubble dan tetap mengirim notification group", async () => {
     const sent = []
-    const sock = { sendMessage: async (jid, content) => { sent.push({ jid, content }); return { key: { id: "sent" } } } }
-    const result = await autoReplyForwarder.sendAutoReply(sock, PRIVATE_JID, { text: "balasan" }, {
-        msg: privateText("pesan"),
+    const source = privateText("pesan", { pushName: "Budi Santoso" })
+    const sock = { sendMessage: async (jid, content, options) => { sent.push({ jid, content, options }); return { key: { id: "sent" } } } }
+    const result = await autoReplyForwarder.sendAutoReply(sock, PRIVATE_JID, { text: "Halo, {name}! Balasan sudah siap." }, {
+        msg: source,
         originalText: "pesan",
         ownerJids: [OWNER_JID],
+        quotedBubble: true,
+        personalizeName: true,
     })
     assert.ok(result)
-    assert.ok(sent.some(item => item.jid === PRIVATE_JID))
+    const privateReply = sent.find(item => item.jid === PRIVATE_JID)
+    assert.ok(privateReply)
+    assert.strictEqual(privateReply.options?.quoted, source)
+    assert.ok(privateReply.content.text.includes("Budi"))
+    assert.ok(!privateReply.content.text.includes("{name}"))
     assert.ok(sent.some(item => item.jid === NOTIFICATION_GROUP_JID))
     assert.ok(!sent.some(item => item.jid === OWNER_JID))
 })
@@ -299,6 +307,28 @@ test("26. command .reply owner hanya merespons di private", async () => {
     assert.strictEqual(await replyCommands.handleReplyCommand(sock, PRIVATE_JID, ".reply status", { isOwner: true }), true)
     assert.ok(sent.at(-1)?.content?.text?.includes("Group Chat: OFF"))
     assert.ok(sent.at(-1)?.content?.text?.includes("Scope: PRIVATE ONLY"))
+})
+
+
+test("27. Auto Reply personalizer mendukung placeholder dan prefix nama", () => {
+    const msg = privateText("halo", { pushName: "Siti Rahma" })
+    assert.strictEqual(autoReplyForwarder.renderPersonalText("Halo, {name}!", msg), "Halo, Siti!")
+    assert.ok(autoReplyForwarder.renderPersonalText("Pesan diterima", msg, { prependName: true }).startsWith("Hai Siti,"))
+    assert.ok(!autoReplyForwarder.renderPersonalText("Halo, {name}!", msg).includes("{name}"))
+})
+
+test("28. Auto Reply bisa mematikan quoted bubble per pemanggilan", async () => {
+    const sent = []
+    const source = privateText("pesan", { pushName: "Budi" })
+    const sock = { sendMessage: async (jid, content, options) => { sent.push({ jid, content, options }); return {} } }
+    await autoReplyForwarder.sendAutoReply(sock, PRIVATE_JID, { text: "Tes" }, {
+        msg: source,
+        quotedBubble: false,
+        personalizeName: false,
+    })
+    const privateReply = sent.find(item => item.jid === PRIVATE_JID)
+    assert.ok(privateReply)
+    assert.strictEqual(privateReply.options, undefined)
 })
 
 async function main() {

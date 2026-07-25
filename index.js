@@ -1,4 +1,4 @@
-﻿require("dotenv").config()
+require("dotenv").config()
 try {
     require("./scripts/patch-baileys-group-retry").applyBaileysGroupRetryPatch({
         silent: process.env.BAILEYS_PATCH_LOG === "false",
@@ -52,6 +52,7 @@ const customAutoReply = require("./modules/customAutoReply");
 const tgStickerConverter = require("./modules/telegramStickerConverter");
 const legacyTgSticker = require("./modules/tg_sticker");
 const autoReplyForwarder = require("./modules/autoReplyForwarder");
+const commandRateLimiter = require("./modules/commandRateLimiter");
 const botBlocklistManager = require("./modules/botBlocklistManager");
 const imageSticker = require("./modules/imageSticker");
 const imageToPdfFeature = require("./modules/imageToPdf");
@@ -175,6 +176,10 @@ function shouldSilencePrivateOnlyCommandInGroup(text, isGroup) {
         || lower.startsWith(".notifytarget ")
         || lower === ".botnotify"
         || lower.startsWith(".botnotify ")
+        || lower === ".ratelimit"
+        || lower.startsWith(".ratelimit ")
+        || lower === ".rlimit"
+        || lower.startsWith(".rlimit ")
 }
 
 const legacyDownloaderCommandSessions = new Map()
@@ -3416,6 +3421,9 @@ async function startBot() {
                 msg,
                 originalText,
                 ownerJids: ownerForwardJids,
+                quotedBubble: true,
+                personalizeName: true,
+                prependName: true,
             })
             routerTrace.trace(msg, {
                 ...traceContext,
@@ -3628,6 +3636,49 @@ async function startBot() {
 
         if (toxicHandled) return
 
+        const rateLimitCommandHandled = await routerTrace.run(msg, traceContext, "commandRateLimiterCommand", () => commandRateLimiter.handleRateLimitCommand(sock, msg, {
+            from,
+            text,
+            isGroup,
+            isOwner: canControlOwner,
+            canControlOwner,
+            senderJid,
+            resolveGroupTarget: groupRemoteControl.resolveGroupTarget,
+        }))
+        if (rateLimitCommandHandled) return
+
+        const rateLimitRequest = commandRateLimiter.classifyRequest({ text, msg, isGroup })
+        if (rateLimitRequest.limited && (isGroup || botStatus.getStatus() || canControlOwner)) {
+            const rateLimitDecision = commandRateLimiter.checkRateLimit({
+                ...rateLimitRequest,
+                actorJid: senderJid || from,
+                chatJid: from,
+                isOwner: canControlOwner,
+            })
+            if (!rateLimitDecision.allowed) {
+                routerTrace.trace(msg, {
+                    ...traceContext,
+                    handler: "commandRateLimiter",
+                    category: rateLimitDecision.category,
+                    command: rateLimitDecision.command,
+                    skipped: true,
+                    reason: rateLimitDecision.reason,
+                    retryAfterMs: rateLimitDecision.retryAfterMs,
+                })
+                if (rateLimitDecision.notify) {
+                    const waitSeconds = Math.max(1, Math.ceil(rateLimitDecision.retryAfterMs / 1000))
+                    try {
+                        await sock.sendMessage(from, {
+                            text: `⏳ Terlalu cepat. Coba lagi dalam ${waitSeconds} detik.`,
+                        }, { quoted: msg })
+                    } catch (error) {
+                        console.log(`[RATE LIMIT] Gagal mengirim warning: ${String(error?.message || error).slice(0, 200)}`)
+                    }
+                }
+                return
+            }
+        }
+
         if (isGroup) {
             const platform = routerTrace.detectPlatform(text)
             if (platform && !routerTrace.detectCommand(text)) {
@@ -3688,6 +3739,8 @@ async function startBot() {
             securityMediaLog,
             messageEditGuardian,
             botNotificationTarget,
+            autoReplyForwarder,
+            commandRateLimiter,
             bcscheduler,
             broadcastSchedulerStatus: getBroadcastSchedulerRuntimeStatus,
         }))
@@ -3754,6 +3807,8 @@ async function startBot() {
                     securityMediaLog,
                     messageEditGuardian,
                     botNotificationTarget,
+                    autoReplyForwarder,
+                    commandRateLimiter,
                 },
             },
         }))
@@ -4332,7 +4387,7 @@ if (targetPdfUser) {
             if (!text && !shouldAutoReplyForMedia) return
             stats.addMessage()
 
-            if (afk.isAFK()) { await sendAutoReplyWithForward({ text: `Lagi ${afk.getReason()} nih, nanti aku bales ya` }); return }
+            if (afk.isAFK()) { await sendAutoReplyWithForward({ text: `Hai {name}, Fahri lagi ${afk.getReason()} nih. Nanti dibalas ya.` }); return }
 
             const isPriority = PRIORITY_USERS.includes(from)
 
@@ -4358,10 +4413,10 @@ if (targetPdfUser) {
             if (scheduledReply) { await sendAutoReplyWithForward({ text: scheduledReply }); return }
 
             const lowText = text.toLowerCase()
-            if (lowText && (lowText.includes("halo") || lowText.includes("assalamualaikum"))) { await sendAutoReplyWithForward({ text: "Halo! Ada yang bisa dibantu? Chat lagi aja ya, ini bot auto-reply." }); return }
-            if (lowText && (lowText.includes("siapa") || lowText.includes("nama"))) { await sendAutoReplyWithForward({ text: "Aku bot asisten pribadi. Ada pesan penting?" }); return }
-            if (lowText && (lowText.includes("p") || lowText.includes("ping"))) { await sendAutoReplyWithForward({ text: "Pesan sudah diterima" }); return }
-            if (lowText && (lowText.includes("lagi apa") || lowText.includes("sibuk"))) { await sendAutoReplyWithForward({ text: "Lagi standby sebagai USERBOT" }); return }
+            if (lowText && (lowText.includes("halo") || lowText.includes("assalamualaikum"))) { await sendAutoReplyWithForward({ text: "Halo, {name}! Ada yang bisa dibantu? Chat lagi aja ya, ini bot auto-reply." }); return }
+            if (lowText && (lowText.includes("siapa") || lowText.includes("nama"))) { await sendAutoReplyWithForward({ text: "Hai {name}, aku USERBOT Fahri. Ada pesan penting yang mau dititipkan?" }); return }
+            if (lowText && (lowText.includes("p") || lowText.includes("ping"))) { await sendAutoReplyWithForward({ text: "Pesanmu sudah diterima, {name} 👍" }); return }
+            if (lowText && (lowText.includes("lagi apa") || lowText.includes("sibuk"))) { await sendAutoReplyWithForward({ text: "Hai {name}, USERBOT sedang standby 😄" }); return }
 
             const hour = new Date().getHours()
             let timeGreeting = ""
@@ -4375,15 +4430,15 @@ if (targetPdfUser) {
             let baseReply = randomReply
 
             // 🔥 SELALU ADA GREETING
-            baseReply = `${timeGreeting}, ${baseReply}`
+            baseReply = `${timeGreeting}, {name}. ${baseReply}`
 
             // MODE TAMBAHAN
             if (BOT_MODE === "formal") {
-                baseReply = `${timeGreeting}, pesan Anda telah kami terima. ${randomReply}`
+                baseReply = `${timeGreeting}, {name}. Pesanmu sudah diterima. ${randomReply}`
             } else if (BOT_MODE === "sales") {
-                baseReply = `${timeGreeting}, ${randomReply}\n\nApakah ingin langsung diproses hari ini?`
+                baseReply = `${timeGreeting}, {name}. ${randomReply}\n\nMau langsung diproses hari ini?`
             } else if (BOT_MODE === "santai") {
-                baseReply = `${timeGreeting}, ${randomReply} 😄`
+                baseReply = `${timeGreeting}, {name}. ${randomReply} 😄`
             }
 
             await sendAutoReplyWithForward({ text: baseReply })
@@ -4401,8 +4456,12 @@ if (targetPdfUser) {
                             text: "Apakah masih ingin dilanjutkan atau ada yang ingin ditanyakan lagi?"
                         }, {
                             remoteJid: from,
+                            msg,
                             originalText: text,
                             ownerJids: ownerForwardJids,
+                            quotedBubble: true,
+                            personalizeName: true,
+                            prependName: true,
                         })
                     } catch {} finally {
                         followUpTracker.delete(from)

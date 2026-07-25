@@ -6,7 +6,8 @@
   "scripts": {
     "postinstall": "node scripts/patch-baileys-group-retry.js",
     "start": "node index.js",
-    "test:auto-reply-scope": "node scripts/test-auto-reply-private-only.js"
+    "test:auto-reply-scope": "node scripts/test-auto-reply-private-only.js",
+    "test:rate-limit": "node scripts/test-command-rate-limit.js"
   },
   "dependencies": {
     "@tensorflow/tfjs": "^4.22.0",
