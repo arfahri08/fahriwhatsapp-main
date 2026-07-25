@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "global": {
+    "enabled": true,
+    "textEnabled": true,
+    "nsfwEnabled": true,
+    "debug": false
+  },
+  "groups": {}
+}

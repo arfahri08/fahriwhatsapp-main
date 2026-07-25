@@ -1,0 +1,47 @@
+# Dependencies
+node_modules/
+
+# WhatsApp session — jangan pernah masuk GitHub
+auth/
+
+# Environment dan secret
+.env
+.env.*
+!.env.example
+
+# SFTP credential
+.vscode/sftp.json
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.log
+*.zip
+
+# Runtime lock
+data/runtime.lock
+data/restartNotice.json
+
+# Cached media
+data/deleted_media/
+data/viewonce2_media/
+
+# Runtime message cache/log
+data/deleted_messages.json
+data/viewonce2_logs.json
+data/statusCache.json
+
+# Personal/runtime state
+data/lidAliases.json
+data/stats.json
+data/statusInbox.json
+data/reactionActions.json
+data/reminder.json
+data/blocklist.json
+crm.json
+
+# Operating system
+.DS_Store
+Thumbs.db
+desktop.ini

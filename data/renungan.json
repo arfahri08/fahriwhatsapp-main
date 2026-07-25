@@ -1,0 +1,64 @@
+{
+  "CATATAN": "FILE INI UNTUK REFERENSI & MANUAL EDIT - Gunakan command agama langsung (.islam/.katolik/dll), .listren, .delt, dan .delall di WhatsApp untuk manage preferences. Edit langsung hanya jika perlu maintenance/cleanup.",
+  "CARA_BERSIHKAN": [
+    "1. Buka file antiToxicReflections.json",
+    "2. Set 'users': {} dan 'groups': {} (kosongkan semua entries)",
+    "3. Save file",
+    "4. Atau di WhatsApp: .delall"
+  ],
+  "EXAMPLE_FORMAT": {
+    "users": {
+      "628123456789@s.whatsapp.net": {
+        "type": "user",
+        "jid": "628123456789@s.whatsapp.net",
+        "profile": "islam",
+        "label": "Islam 🕌",
+        "updatedAt": "2026-06-08T10:30:00.000Z",
+        "updatedBy": "owner"
+      },
+      "628987654321@s.whatsapp.net": {
+        "type": "user",
+        "jid": "628987654321@s.whatsapp.net",
+        "profile": "katolik",
+        "label": "Katolik ✝️",
+        "updatedAt": "2026-06-08T10:31:00.000Z",
+        "updatedBy": "owner"
+      }
+    },
+    "groups": {
+      "123456789-1234567890@g.us": {
+        "type": "group",
+        "jid": "123456789-1234567890@g.us",
+        "profile": "kristen",
+        "label": "Kristen ⛪",
+        "updatedAt": "2026-06-08T10:32:00.000Z",
+        "updatedBy": "owner"
+      }
+    }
+  },
+  "PROFIL_TERSEDIA": {
+    "islam": "Islam 🕌",
+    "katolik": "Katolik ✝️",
+    "kristen": "Kristen ⛪",
+    "hindu": "Hindu 🙏",
+    "buddha": "Buddha 🧘",
+    "konghucu": "Konghucu ☯️",
+    "kepercayaan": "Kepercayaan/Budaya 📿"
+  },
+  "FORMAT_NOMOR_YANG_VALID": [
+    "628123456789 (format standar)",
+    "62 8123-456-789 (dengan spasi & dash)",
+    "+62 812-345-6789 (dengan plus & spasi)",
+    "0812345678 (format 0, auto convert ke 62)",
+    "+62 81 2345-6789 (variasi)",
+    "628123456789@s.whatsapp.net (full JID)"
+  ],
+  "COMMAND_CONTOH": {
+    "setup_per_kontak": ".islam 628123456789",
+    "setup_bulk": ".katolik 628123456789 628987654321 +62 812-3456-789",
+    "setup_grup": ".kristen 123456789-1234567890@g.us",
+    "lihat_semua": ".listren",
+    "hapus_satu": ".delt 628123456789",
+    "hapus_semua": ".delall"
+  }
+}
