@@ -67,7 +67,15 @@ const fakeVn = require("./modules/fakeVn");
 const qrArt = require("./modules/qrArt");
 const stickerSafetyGuard = require("./modules/stickerSafetyGuard");
 const healthCheck = require("./modules/healthCheck");
-const routerTrace = require("./modules/routerTrace");
+const routerTraceModule = require("./modules/routerTrace");
+const routerTrace = {
+    trace: typeof routerTraceModule.trace === "function" ? routerTraceModule.trace : () => false,
+    run: typeof routerTraceModule.run === "function"
+        ? routerTraceModule.run
+        : async (_msg, _context, _handler, callback) => (typeof callback === "function" ? callback() : false),
+    detectCommand: typeof routerTraceModule.detectCommand === "function" ? routerTraceModule.detectCommand : () => "",
+    detectPlatform: typeof routerTraceModule.detectPlatform === "function" ? routerTraceModule.detectPlatform : () => "",
+};
 const reactionWorkflow = require("./modules/reactionWorkflow");
 const messageEditGuardian = require("./modules/messageEditGuardian");
 const loginManager = require("./modules/login");

@@ -45,3 +45,5 @@ crm.json
 .DS_Store
 Thumbs.db
 desktop.ini
+# Local patch backups
+.patch-backups/
