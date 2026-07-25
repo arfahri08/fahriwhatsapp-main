@@ -681,10 +681,10 @@ async function runSpotifyDownloadFlow(sock, msg, context, spotifyUrl) {
 async function handleSpotifyDownloader(sock, msg, context = {}) {
     const from = context.from || msg?.key?.remoteJid
     const isGroup = Boolean(context.isGroup || String(from || "").endsWith("@g.us"))
-    if (isGroup) return false
-
     const text = String(context.text || "").trim()
     const parsedCommand = parseCommand(text)
+    // Bare Spotify links are private-only. Explicit .spdl/.spotify commands remain available in active groups.
+    if (isGroup && !parsedCommand.isSpotifyCommand) return false
     const explicitUrl = parsedCommand.args.find(isSpotifyUrl) || extractFirstUrl(parsedCommand.args.join(" "))
     const detectedUrl = extractFirstUrl(text)
     const spotifyUrl = explicitUrl || detectedUrl

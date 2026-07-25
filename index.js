@@ -641,10 +641,6 @@ async function handleCalculatorCommand(sock, msg, context = {}) {
 }
 
 async function handleLegacyDownloaderCommand(sock, msg, context = {}) {
-    if (context.isGroup || String(context.from || msg?.key?.remoteJid || "").toLowerCase().endsWith("@g.us")) {
-        return false
-    }
-
     const text = String(context.text || "").trim()
     const lower = text.toLowerCase()
     const now = Date.now()
@@ -3352,7 +3348,7 @@ async function startBot() {
         const traceContext = {
             from,
             text,
-            ...(isGroup ? { policy: "antiToxicOnly" } : {}),
+            ...(isGroup ? { policy: "groupEnabledNoAutoLinkOrReply" } : {}),
         }
 
         const traceGroupAutoReplySkips = () => {
@@ -3375,22 +3371,20 @@ async function startBot() {
         if (isGroup) {
             traceGroupAutoReplySkips()
             const groupBotEnabled = groupRemoteControl.isGroupBotEnabled(from)
-            const antiToxicInboundAllowed = groupRemoteControl.isInboundGroupFeatureAllowed("antiToxic")
-            const groupAntiToxicEnabled = groupRemoteControl.isGroupFeatureEnabled(from, "antiToxic")
 
-            if (!groupBotEnabled || !antiToxicInboundAllowed || !groupAntiToxicEnabled) {
+            if (!groupBotEnabled) {
                 routerTrace.trace(msg, {
                     ...traceContext,
-                    policy: groupBotEnabled ? "antiToxicOnly" : "disabled",
-                    handler: "antiToxic",
+                    policy: "disabled",
+                    handler: "groupRouter",
                     skipped: true,
-                    reason: !groupBotEnabled ? "bot-disabled" : "feature-disabled",
+                    reason: "bot-disabled",
                 })
-                debugAntiToxicPipeline("skip-by-group-inbound-policy", {
+                debugAntiToxicPipeline("skip-by-group-bot-disabled", {
                     id: msg?.key?.id,
                     from,
                     senderJid,
-                    reason: !groupBotEnabled ? "bot-disabled" : "anti-toxic-disabled",
+                    reason: "bot-disabled",
                 })
                 return
             }
@@ -3488,7 +3482,7 @@ async function startBot() {
         }))
         if (antiToxicStickerOcrHandled) return
 
-        const stickerSafetyCommandHandled = !isGroup && await routerTrace.run(msg, traceContext, "stickerSafetyCommand", () => stickerSafetyGuard.handleStickerSafetyCommand(sock, msg, {
+        const stickerSafetyCommandHandled = await routerTrace.run(msg, traceContext, "stickerSafetyCommand", () => stickerSafetyGuard.handleStickerSafetyCommand(sock, msg, {
             from,
             sender: senderJid,
             senderJid,
@@ -3500,7 +3494,7 @@ async function startBot() {
         }))
         if (stickerSafetyCommandHandled) return
 
-        const stickerSafetyResult = !isGroup && await routerTrace.run(msg, traceContext, "stickerSafetyGuard", () => stickerSafetyGuard.handleStickerSafety(sock, msg, {
+        const stickerSafetyResult = await routerTrace.run(msg, traceContext, "stickerSafetyGuard", () => stickerSafetyGuard.handleStickerSafety(sock, msg, {
             from,
             sender: senderJid,
             senderJid,
@@ -3632,22 +3626,20 @@ async function startBot() {
             })
         }
 
+        if (toxicHandled) return
+
         if (isGroup) {
-            if (!toxicHandled) {
-                const command = routerTrace.detectCommand(text)
-                const platform = routerTrace.detectPlatform(text)
+            const platform = routerTrace.detectPlatform(text)
+            if (platform && !routerTrace.detectCommand(text)) {
                 routerTrace.trace(msg, {
                     ...traceContext,
-                    command,
                     platform,
-                    handler: platform ? "linkDetection" : (command ? "command" : "groupInbound"),
+                    handler: "linkDetection",
                     skipped: true,
+                    reason: "private-only",
                 })
             }
-            return
         }
-
-        if (toxicHandled) return
 
         // Legacy antiNsfwSticker routing dinonaktifkan agar stiker tidak diproses dua kali.
         // Sticker Safety Guard menjadi handler utama moderasi stiker.
@@ -3774,7 +3766,8 @@ async function startBot() {
         }))
         if (calculatorHandled) return
 
-        const handledSpotify = !isGroup && await routerTrace.run(msg, traceContext, "spotifyDownloader", () => spotifyDownloader.handleSpotifyDownloader(sock, msg, {
+        const groupDownloaderEnabled = !isGroup || groupRemoteControl.isGroupFeatureEnabled(from, "downloader")
+        const handledSpotify = groupDownloaderEnabled && await routerTrace.run(msg, traceContext, "spotifyDownloader", () => spotifyDownloader.handleSpotifyDownloader(sock, msg, {
             from,
             sender: senderJid,
             senderJid,
@@ -3792,7 +3785,7 @@ async function startBot() {
             if (extendedDownloadHandled) return
         }
 
-        if (!isGroup) {
+        if (groupDownloaderEnabled) {
             const legacyDownloaderHandled = await routerTrace.run(msg, traceContext, "legacyDownloader", () => handleLegacyDownloaderCommand(sock, msg, {
                 from,
                 text,

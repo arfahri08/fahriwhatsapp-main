@@ -7,15 +7,8 @@ const DATA_FILE = path.join(__dirname, "..", "data", "groupRemoteControl.json")
 const PRIVATE_ONLY_FEATURES = new Set([
     "antilink",
     "antiLink",
-    "downloader",
     "autoreply",
     "autoReply",
-    "stickersafety",
-    "stickerSafety",
-    "stickertext",
-    "stickerText",
-    "stickernsfw",
-    "stickerNsfw",
 ])
 const FEATURE_ALIASES = {
     antikasar: "antiToxic",
@@ -144,20 +137,21 @@ function isGroupBotEnabled(groupJid) {
 }
 
 function isInboundGroupFeatureAllowed(featureName) {
-    return canonicalFeatureName(featureName) === "antiToxic"
+    const feature = canonicalFeatureName(featureName)
+    return !PRIVATE_ONLY_FEATURES.has(feature)
 }
 
 function isGroupFeatureEnabled(groupJid, featureName) {
     if (!isGroupJid(groupJid)) return true
     if (!isGroupBotEnabled(groupJid)) return false
     const feature = canonicalFeatureName(featureName)
-    const effective = getEffectiveGroupConfig(groupJid)
+    if (PRIVATE_ONLY_FEATURES.has(feature)) return false
 
-    if (feature === "antiToxic" || feature === "editGuardian" || feature === "privateWarn") {
+    const effective = getEffectiveGroupConfig(groupJid)
+    if (Object.prototype.hasOwnProperty.call(DEFAULT_FEATURES, feature)) {
         return effective.features[feature] !== false
     }
 
-    // Kebijakan inbound group saat ini: hanya Anti Kasar dan guardian edit sebagai bagian Anti Kasar.
     return false
 }
 
@@ -167,15 +161,15 @@ function isGroupAntiToxicPrivateReplyEnabled(groupJid) {
 
 function getInboundGroupPolicySummary() {
     return {
-        mode: "ANTI TOXIC ONLY",
+        mode: "COMMANDS & FEATURES (NO AUTO LINK / AUTO REPLY)",
         groupBotDefault: true,
         groupAntiToxic: true,
         groupDetectLink: false,
         privateDetectLink: true,
-        groupDownloader: false,
+        groupDownloader: true,
         groupAutoReply: false,
-        groupStickerSafety: false,
-        allowedInboundFeatures: ["antiToxic"],
+        groupStickerSafety: true,
+        allowedInboundFeatures: Object.keys(DEFAULT_FEATURES).filter(feature => !PRIVATE_ONLY_FEATURES.has(feature)),
     }
 }
 
@@ -289,8 +283,9 @@ function resetGroup(groupJid) {
 
 function formatEffectiveStatus(resolved, config) {
     const botEnabled = config.botEnabled !== false
-    const antiToxic = botEnabled && config.features.antiToxic !== false
-    const editGuardian = antiToxic && config.features.editGuardian !== false
+    const featureStatus = feature => botEnabled && config.features[feature] !== false
+    const antiToxic = featureStatus("antiToxic")
+    const editGuardian = antiToxic && featureStatus("editGuardian")
     return [
         "🎛️ *GROUP CONTROL*",
         "",
@@ -298,14 +293,17 @@ function formatEffectiveStatus(resolved, config) {
         `ID: ${resolved.jid}`,
         resolved.code ? `Kode: ${resolved.code}` : "",
         `Bot: ${botEnabled ? "ON" : "OFF"}`,
-        `Group Mode: ${botEnabled ? "ANTI KASAR ONLY" : "DISABLED"}`,
+        `Group Mode: ${botEnabled ? "COMMANDS & FEATURES" : "DISABLED"}`,
         `Anti Kasar: ${antiToxic ? "ON" : "OFF"}`,
         `Edited Message Guardian: ${editGuardian ? "ON" : "OFF"}`,
-        "Detect Link: PRIVATE ONLY",
-        "Downloader: PRIVATE ONLY",
+        `Downloader Commands: ${featureStatus("downloader") ? "ON" : "OFF"}`,
+        `Sticker Safety: ${featureStatus("stickerSafety") ? "ON" : "OFF"}`,
+        `Sticker Text: ${featureStatus("stickerText") ? "ON" : "OFF"}`,
+        `Sticker NSFW: ${featureStatus("stickerNsfw") ? "ON" : "OFF"}`,
+        `Broadcast: ${featureStatus("broadcast") ? "ON" : "OFF"}`,
+        "Detect Link Otomatis: PRIVATE ONLY",
         "Auto Reply: PRIVATE ONLY",
         "Group Auto Reply: OFF",
-        "Sticker Safety: PRIVATE ONLY",
         config.note ? `Catatan: ${config.note}` : "",
     ].filter(Boolean).join("\n")
 }
@@ -322,10 +320,14 @@ function commandHelp() {
         ".groupctl feature <G001|group_jid> antikasar on/off",
         ".groupctl feature <G001|group_jid> editguard on/off",
         ".groupctl feature <G001|group_jid> privatewarn on/off",
+        ".groupctl feature <G001|group_jid> downloader on/off",
+        ".groupctl feature <G001|group_jid> stickersafety on/off",
+        ".groupctl feature <G001|group_jid> stickertext on/off",
+        ".groupctl feature <G001|group_jid> stickernsfw on/off",
         ".groupctl note <G001|group_jid> <catatan>",
         "",
-        "Kebijakan inbound group: Anti Kasar Only.",
-        "Detect Link, downloader, Auto Reply, dan Sticker Safety adalah private-only.",
+        "Saat Bot group ON, command dan fitur group tetap berjalan sesuai permission/config.",
+        "Hanya Detect Link otomatis dan Auto Reply yang private-only.",
     ].join("\n")
 }
 
@@ -351,7 +353,7 @@ async function handleGroupRemoteControlCommand(sock, msg, context = {}) {
             lines.push(`${code} — ${item.subject}`)
             lines.push(`ID: ${item.jid}`)
             lines.push(`Status: ${config.botEnabled ? "aktif" : "custom / OFF"}`)
-            lines.push(`Mode: ${config.botEnabled ? "Anti Kasar Only" : "Disabled"}`)
+            lines.push(`Mode: ${config.botEnabled ? "Commands & Features" : "Disabled"}`)
             lines.push("")
         }
         await sock.sendMessage(remoteJid, { text: lines.join("\n").trim() })
@@ -422,11 +424,11 @@ async function handleGroupRemoteControlCommand(sock, msg, context = {}) {
             await sock.sendMessage(remoteJid, { text: "Auto Reply sekarang private-only dan tidak dapat diaktifkan untuk group." })
             return true
         }
-        if (["antiLink", "downloader", "stickerSafety", "stickerText", "stickerNsfw"].includes(feature)) {
-            await sock.sendMessage(remoteJid, { text: "Fitur tersebut saat ini private-only dan tidak dapat diaktifkan untuk group." })
+        if (feature === "antiLink") {
+            await sock.sendMessage(remoteJid, { text: "Detect Link otomatis private-only dan tidak dapat diaktifkan untuk group." })
             return true
         }
-        if (!new Set(["antiToxic", "editGuardian", "privateWarn", "broadcast"]).has(feature)) {
+        if (!new Set(["antiToxic", "editGuardian", "privateWarn", "broadcast", "downloader", "stickerSafety", "stickerText", "stickerNsfw", "warning"]).has(feature)) {
             await sock.sendMessage(remoteJid, { text: "Fitur group tidak dikenali." })
             return true
         }

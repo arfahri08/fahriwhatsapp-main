@@ -245,7 +245,7 @@ test("23. help menjelaskan kebijakan Auto Reply dan group", () => {
     assert.ok(text.includes("Auto Reply hanya bekerja melalui private chat."))
     assert.ok(text.includes("Notifikasi Auto Reply Forwarder dikirim ke grup notification, bukan PM owner."))
     assert.ok(text.includes("Keyword Reply otomatis hanya bekerja di private chat."))
-    assert.ok(text.includes("Untuk saat ini bot di grup hanya menjalankan Anti Kasar."))
+    assert.ok(text.includes("Saat Bot group ON, command dan fitur yang memang mendukung group tetap dapat digunakan sesuai permission dan konfigurasi masing-masing."))
 })
 
 test("24. health menampilkan scope dan aman saat status gagal dibaca", async () => {
