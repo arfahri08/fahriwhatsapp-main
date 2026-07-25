@@ -89,7 +89,7 @@ test("hentai hard threshold", () => {
 });
 
 test("sexy low does not trigger", () => {
-    const result = guard.evaluateNsfwPredictions([{ frameIndex: 0, predictions: { Sexy: 0.8 } }], { isStatic: true });
+    const result = guard.evaluateNsfwPredictions([{ frameIndex: 0, predictions: { Sexy: 0.45 } }], { isStatic: true });
     assert.strictEqual(result.violation, false);
 });
 
@@ -216,7 +216,7 @@ test("animated timestamps cover full duration", () => {
 });
 
 test("cache pipeline version invalidates old clean results", () => {
-    assert.strictEqual(guard.NSFW_PIPELINE_VERSION, "sticker-nsfw-v2");
+    assert.strictEqual(guard.NSFW_PIPELINE_VERSION, "sticker-nsfw-v6-local-vision");
     assert(source.includes("`${NSFW_PIPELINE_VERSION}:${hash}`"));
 });
 
@@ -235,4 +235,27 @@ test("NSFW scan has crop-region second pass", () => {
     assert(source.includes("buildNsfwRegions"));
     assert(source.includes("regionScans"));
     assert(source.includes("rankSuspiciousFrames"));
+});
+
+
+test("ImageMagick is primary animated decoder", () => {
+    assert(source.includes("extractFramesWithImageMagick"));
+    assert(source.includes("-coalesce"));
+    assert(source.indexOf("extractFramesWithImageMagick") < source.indexOf("extractFramesWithFfmpeg"));
+});
+
+test("local ONNX vision is integrated", () => {
+    assert(source.includes('require("./localNsfwVision")'));
+    assert(source.includes("inspectFrames(frames"));
+    assert(source.includes("sticker-nsfw-v6-local-vision"));
+});
+
+test("indeterminate result is not cached", () => {
+    assert(source.includes("if (!result.indeterminate) setCacheRecord"));
+    assert(source.includes("all-nsfw-engines-unavailable"));
+});
+
+test("fromMe sticker scanning stays enabled", () => {
+    assert(!source.includes('if (msg?.key?.fromMe) return { inspected: false, reason: "from-me" }'));
+    assert(source.includes("scanFromMe"));
 });

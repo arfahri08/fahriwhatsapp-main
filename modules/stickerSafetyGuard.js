@@ -13,6 +13,10 @@ let sharpLoadAttempted = false;
 let downloadContentFromMessage = null;
 let pngjs = null;
 let tfBackendName = "unknown";
+let localNsfwVision = null;
+let imageMagickCommand = null;
+let imageMagickStatus = "LAZY";
+let imageMagickDetail = "";
 
 const DATA_DIR = path.join(__dirname, "..", "data");
 const STATE_PATH = path.join(DATA_DIR, "stickerSafetyGuard.json");
@@ -46,7 +50,7 @@ const recentMessageIds = new Map();
 const recentStickerHashes = new Map();
 const MESSAGE_DEDUPE_TTL_MS = 2 * 60 * 1000;
 const HASH_DEDUPE_TTL_MS = 30 * 1000;
-const NSFW_PIPELINE_VERSION = "sticker-nsfw-v3";
+const NSFW_PIPELINE_VERSION = "sticker-nsfw-v6-local-vision";
 
 let stateCache = null;
 let wordCache = null;
@@ -100,6 +104,10 @@ function getRuntimeConfig() {
         ffmpegTimeoutMs: Math.max(1000, parseNumber(process.env.STICKER_SAFETY_FFMPEG_TIMEOUT_MS, 25000)),
         ffmpegBin: String(process.env.FFMPEG_BIN || process.env.FFMPEG_PATH || "ffmpeg").trim() || "ffmpeg",
         ffprobeBin: String(process.env.FFPROBE_BIN || "ffprobe").trim() || "ffprobe",
+        imageMagickBin: String(process.env.IMAGEMAGICK_BIN || process.env.MAGICK_BIN || "magick").trim() || "magick",
+        imageMagickTimeoutMs: Math.max(5000, parseNumber(process.env.STICKER_SAFETY_IMAGEMAGICK_TIMEOUT_MS, 45000)),
+        imageMagickMaxSourceFrames: Math.max(10, Math.min(500, Math.floor(parseNumber(process.env.STICKER_SAFETY_IMAGEMAGICK_MAX_SOURCE_FRAMES, 250)))),
+        localVisionEnabled: parseBool(process.env.STICKER_LOCAL_VISION_ENABLED, true),
         ocrScale: Math.max(1, Math.min(5, Math.floor(parseNumber(process.env.STICKER_OCR_SCALE, 3)))),
         ocrVariants: Math.max(1, Math.min(3, Math.floor(parseNumber(process.env.STICKER_OCR_VARIANTS, 2)))),
         ocrLangs: String(process.env.STICKER_OCR_LANGS || "ind+eng").trim() || "eng",
@@ -163,6 +171,11 @@ function getBaileysDownloadContent() {
         ({ downloadContentFromMessage } = require("@whiskeysockets/baileys"));
     }
     return downloadContentFromMessage;
+}
+
+function getLocalNsfwVision() {
+    if (!localNsfwVision) localNsfwVision = require("./localNsfwVision");
+    return localNsfwVision;
 }
 
 function getSharp() {
@@ -520,6 +533,17 @@ function buildEvenSampleTimestamps(durationSeconds, maxFrames) {
     });
 }
 
+function buildEvenSampleIndices(totalFrames, maxFrames) {
+    const total = Math.max(0, Math.floor(Number(totalFrames) || 0));
+    const max = Math.max(1, Math.floor(Number(maxFrames) || 1));
+    if (total <= max) return Array.from({ length: total }, (_, index) => index);
+    const indexes = new Set();
+    for (let index = 0; index < max; index += 1) {
+        indexes.add(Math.round(index * (total - 1) / (max - 1)));
+    }
+    return [...indexes].sort((a, b) => a - b);
+}
+
 async function probeMediaDuration(inputPath, config = getRuntimeConfig()) {
     try {
         const { stdout } = await execFileWithTimeout(config.ffprobeBin, [
@@ -556,70 +580,187 @@ async function extractSequentialFrames(inputPath, outputPattern, maxFrames, conf
     ], { timeoutMs: config.ffmpegTimeoutMs });
 }
 
+async function resolveImageMagickCommand(config = getRuntimeConfig()) {
+    if (imageMagickCommand) return imageMagickCommand;
+    const candidates = [...new Set([config.imageMagickBin, "magick", "convert"].filter(Boolean))];
+    let lastError = null;
+    for (const command of candidates) {
+        try {
+            const args = command.toLowerCase().endsWith("convert") ? ["-version"] : ["-version"];
+            const { stdout, stderr } = await execFileWithTimeout(command, args, {
+                timeoutMs: Math.min(config.imageMagickTimeoutMs, 10000),
+                maxBuffer: 2 * 1024 * 1024,
+            });
+            imageMagickCommand = command;
+            imageMagickStatus = "READY";
+            imageMagickDetail = String(stdout || stderr || "").split(/\r?\n/)[0].slice(0, 180);
+            return command;
+        } catch (error) {
+            lastError = error;
+        }
+    }
+    imageMagickStatus = "ERROR";
+    imageMagickDetail = shortError(lastError || "ImageMagick tidak ditemukan");
+    throw new Error(`ImageMagick tidak tersedia: ${imageMagickDetail}`);
+}
+
+async function extractFramesWithImageMagick(inputPath, tempDir, maxFrames, config) {
+    const command = await resolveImageMagickCommand(config);
+    const rawPattern = path.join(tempDir, "magick_%05d.png");
+    await execFileWithTimeout(command, [
+        inputPath,
+        "-coalesce",
+        "-background", "white",
+        "-alpha", "remove",
+        "-alpha", "off",
+        rawPattern,
+    ], {
+        timeoutMs: config.imageMagickTimeoutMs,
+        maxBuffer: 4 * 1024 * 1024,
+    });
+
+    const allFiles = (await fs.promises.readdir(tempDir))
+        .filter(name => /^magick_\d+\.png$/i.test(name))
+        .sort();
+    if (!allFiles.length) throw new Error("ImageMagick menghasilkan 0 frame");
+    if (allFiles.length > config.imageMagickMaxSourceFrames) {
+        throw new Error(`jumlah frame ${allFiles.length} melewati batas ${config.imageMagickMaxSourceFrames}`);
+    }
+
+    const sampleIndices = buildEvenSampleIndices(allFiles.length, maxFrames);
+    const selectedFiles = [];
+    for (let outputIndex = 0; outputIndex < sampleIndices.length; outputIndex += 1) {
+        const sourceIndex = sampleIndices[outputIndex];
+        const sourcePath = path.join(tempDir, allFiles[sourceIndex]);
+        const selectedName = `frame_${String(outputIndex + 1).padStart(3, "0")}.png`;
+        const selectedPath = path.join(tempDir, selectedName);
+        await fs.promises.copyFile(sourcePath, selectedPath);
+        selectedFiles.push({ name: selectedName, sourceIndex });
+    }
+    return {
+        decoder: "imagemagick",
+        sourceFrameCount: allFiles.length,
+        sampleIndices,
+        selectedFiles,
+    };
+}
+
+async function extractFramesWithFfmpeg(inputPath, tempDir, animated, maxFrames, config) {
+    const outputPattern = path.join(tempDir, "frame_%03d.png");
+    let duration = 0;
+    let sampleTimestamps = [0];
+    if (animated) {
+        duration = await probeMediaDuration(inputPath, config);
+        sampleTimestamps = buildEvenSampleTimestamps(duration, maxFrames);
+        if (duration > 0) {
+            for (let index = 0; index < sampleTimestamps.length; index += 1) {
+                const outputPath = path.join(tempDir, `frame_${String(index + 1).padStart(3, "0")}.png`);
+                await extractFrameAtTimestamp(inputPath, outputPath, sampleTimestamps[index], config);
+            }
+        } else {
+            await extractSequentialFrames(inputPath, outputPattern, maxFrames, config);
+        }
+    } else {
+        await extractFrameAtTimestamp(inputPath, path.join(tempDir, "frame_001.png"), 0, config);
+    }
+    const files = (await fs.promises.readdir(tempDir))
+        .filter(name => /^frame_\d+\.png$/i.test(name))
+        .sort()
+        .slice(0, maxFrames);
+    if (!files.length) throw new Error("FFmpeg menghasilkan 0 frame");
+    return {
+        decoder: "ffmpeg",
+        sourceFrameCount: files.length,
+        sampleIndices: files.map((_, index) => index),
+        sampleTimestamps,
+        selectedFiles: files.map((name, index) => ({ name, sourceIndex: index })),
+        duration,
+    };
+}
+
 async function extractStickerFrames(buffer, stickerMessage = {}, options = {}) {
     ensureDirs();
     const config = getRuntimeConfig();
     const maxFrames = Math.max(1, Math.min(config.maxFrames, Number(options.maxFrames || config.maxFrames)));
     const tempDir = await fs.promises.mkdtemp(path.join(TMP_ROOT, "job-"));
     const inputPath = path.join(tempDir, "sticker.webp");
-    const outputPattern = path.join(tempDir, "frame_%03d.png");
     await fs.promises.writeFile(inputPath, buffer);
 
     const animated = Boolean(stickerMessage?.isAnimated);
-    let duration = 0;
-    let sampleTimestamps = [0];
+    let duration = animated ? await probeMediaDuration(inputPath, config) : 0;
+    let extraction = null;
+    let imageMagickError = null;
+    let ffmpegError = null;
+
     try {
-        if (animated) {
-            duration = await probeMediaDuration(inputPath, config);
-            sampleTimestamps = buildEvenSampleTimestamps(duration, maxFrames);
-            if (duration > 0) {
-                for (let index = 0; index < sampleTimestamps.length; index += 1) {
-                    const outputPath = path.join(tempDir, `frame_${String(index + 1).padStart(3, "0")}.png`);
-                    await extractFrameAtTimestamp(inputPath, outputPath, sampleTimestamps[index], config);
-                }
-            } else {
-                await extractSequentialFrames(inputPath, outputPattern, maxFrames, config);
-            }
-        } else {
-            await extractFrameAtTimestamp(inputPath, path.join(tempDir, "frame_001.png"), 0, config);
-        }
+        extraction = await extractFramesWithImageMagick(inputPath, tempDir, maxFrames, config);
     } catch (error) {
+        imageMagickError = error;
+        console.log(`[STICKER SAFETY] ImageMagick decode gagal, mencoba FFmpeg: ${shortError(error)}`);
+    }
+
+    if (!extraction) {
+        try {
+            extraction = await extractFramesWithFfmpeg(inputPath, tempDir, animated, maxFrames, config);
+            duration = extraction.duration || duration;
+        } catch (error) {
+            ffmpegError = error;
+        }
+    }
+
+    if (!extraction) {
         const sharpRuntime = getSharp();
-        if (!sharpRuntime) throw new Error(`ffmpeg gagal ekstrak frame dan sharp tidak tersedia: ${shortError(error)}`);
-        const fallbackPath = path.join(tempDir, "frame_001.png");
+        if (!sharpRuntime) {
+            throw new Error(`semua decoder gagal | ImageMagick: ${shortError(imageMagickError)} | FFmpeg: ${shortError(ffmpegError)} | sharp: missing`);
+        }
+        const fallbackName = "frame_001.png";
         await sharpRuntime(buffer, { animated: false })
             .flatten({ background: "#ffffff" })
             .png()
-            .toFile(fallbackPath);
+            .toFile(path.join(tempDir, fallbackName));
+        extraction = {
+            decoder: "sharp-first-frame",
+            sourceFrameCount: 1,
+            sampleIndices: [0],
+            selectedFiles: [{ name: fallbackName, sourceIndex: 0 }],
+        };
         duration = 0;
-        sampleTimestamps = [0];
     }
 
-    const files = (await fs.promises.readdir(tempDir))
-        .filter(name => /^frame_\d+\.png$/i.test(name))
-        .sort()
-        .slice(0, maxFrames);
-
     const frames = [];
-    for (let i = 0; i < files.length; i += 1) {
-        const filePath = path.join(tempDir, files[i]);
+    const sampleTimestamps = [];
+    for (let index = 0; index < extraction.selectedFiles.length; index += 1) {
+        const selected = extraction.selectedFiles[index];
+        const filePath = path.join(tempDir, selected.name);
+        const timestamp = duration > 0 && extraction.sourceFrameCount > 1
+            ? Number((duration * selected.sourceIndex / (extraction.sourceFrameCount - 1)).toFixed(3))
+            : selected.sourceIndex;
+        sampleTimestamps.push(timestamp);
         frames.push({
-            index: i,
+            index,
+            sourceIndex: selected.sourceIndex,
             path: filePath,
             buffer: await fs.promises.readFile(filePath),
-            timestamp: sampleTimestamps[i] ?? null,
+            timestamp,
         });
     }
 
-    if (!frames.length) throw new Error("frame sticker kosong");
+    if (!frames.length) throw new Error("frame sticker kosong setelah decode");
 
     return {
-        type: animated ? "animated" : "static",
-        animated,
+        type: animated || extraction.sourceFrameCount > 1 ? "animated" : "static",
+        animated: animated || extraction.sourceFrameCount > 1,
+        decoder: extraction.decoder,
+        sourceFrameCount: extraction.sourceFrameCount,
+        sampleIndices: extraction.sampleIndices,
         duration,
         sampleTimestamps,
         tempDir,
         frames,
+        decoderErrors: {
+            imageMagick: imageMagickError ? shortError(imageMagickError) : "",
+            ffmpeg: ffmpegError ? shortError(ffmpegError) : "",
+        },
     };
 }
 
@@ -1287,80 +1428,127 @@ async function inspectStickerNsfw(frames, options = {}) {
         predictions: {},
         reason: "",
         pipelineVersion: NSFW_PIPELINE_VERSION,
+        localVision: null,
         error: "",
     };
 
     try {
-        for (let index = 0; index < (frames || []).length; index += 1) {
+        let localDecision = null;
+        if (config.localVisionEnabled) {
             try {
-                result.frames.push(await classifyNsfwFrame(frames[index], index, "full"));
-                result.primaryFrames += 1;
+                result.localVision = await getLocalNsfwVision().inspectFrames(frames, {
+                    maxFrames: config.maxFrames,
+                });
+                if (result.localVision?.violation) {
+                    localDecision = {
+                        violation: true,
+                        category: result.localVision.category || "nudity",
+                        confidence: Number(result.localVision.confidence || 0),
+                        frameIndex: Number(
+                            result.localVision?.nudeNet?.frames?.find(item => item.decision?.violation)?.frameIndex
+                            ?? result.localVision?.vit?.frames?.sort((a, b) => Number(b.nsfw || 0) - Number(a.nsfw || 0))?.[0]?.frameIndex
+                            ?? 0
+                        ),
+                        region: "local-vision",
+                        predictions: {},
+                        reason: result.localVision.reason || "local-vision-violation",
+                    };
+                }
             } catch (error) {
-                console.log(`[STICKER SAFETY] NSFW primary frame failed: ${shortError(error)}`);
+                result.localVision = {
+                    available: false,
+                    violation: false,
+                    reason: "local-vision-error",
+                    errors: [shortError(error)],
+                };
             }
         }
 
-        let decision = evaluateNsfwPredictions(result.frames, options);
-        if (!decision.violation) {
-            const rankedFrames = rankSuspiciousFrames(result.frames);
-            let suspiciousFrames = rankedFrames
-                .filter(item => item.score >= config.nsfwCropTriggerThreshold)
-                .slice(0, config.nsfwCropFrameCount);
-            if (!suspiciousFrames.length && rankedFrames.length) {
-                suspiciousFrames = rankedFrames.slice(0, options.isStatic ? 1 : config.nsfwCropFrameCount);
-            }
-            for (const suspicious of suspiciousFrames) {
-                const sourceFrame = frames[suspicious.frameIndex];
-                for (const variant of buildAugmentedFrameVariants({
-                    buffer: sourceFrame?.buffer || sourceFrame,
-                    timestamp: sourceFrame?.timestamp,
-                    frameIndex: suspicious.frameIndex,
-                })) {
-                    try {
-                        result.frames.push(await classifyNsfwFrame({
-                            buffer: variant.buffer,
-                            timestamp: variant.timestamp,
-                        }, suspicious.frameIndex, variant.region));
-                        result.regionScans += 1;
-                    } catch (error) {
-                        console.log(`[STICKER SAFETY] NSFW augment failed: ${shortError(error)}`);
-                    }
-                }
-                for (const region of buildNsfwRegions(sourceFrame, config.nsfwMaxRegions)) {
-                    try {
-                        result.frames.push(await classifyNsfwFrame({
-                            buffer: region.buffer,
-                            timestamp: sourceFrame?.timestamp,
-                        }, suspicious.frameIndex, region.name));
-                        result.regionScans += 1;
-                    } catch (error) {
-                        console.log(`[STICKER SAFETY] NSFW crop failed: ${shortError(error)}`);
-                    }
+        if (!localDecision) {
+            for (let index = 0; index < (frames || []).length; index += 1) {
+                try {
+                    result.frames.push(await classifyNsfwFrame(frames[index], index, "full"));
+                    result.primaryFrames += 1;
+                } catch (error) {
+                    console.log(`[STICKER SAFETY] NSFW primary frame failed: ${shortError(error)}`);
                 }
             }
-            decision = evaluateNsfwPredictions(result.frames, options);
+
+            let decision = evaluateNsfwPredictions(result.frames, options);
+            if (!decision.violation) {
+                const rankedFrames = rankSuspiciousFrames(result.frames);
+                let suspiciousFrames = rankedFrames
+                    .filter(item => item.score >= config.nsfwCropTriggerThreshold)
+                    .slice(0, config.nsfwCropFrameCount);
+                if (!suspiciousFrames.length && rankedFrames.length) {
+                    suspiciousFrames = rankedFrames.slice(0, options.isStatic ? 1 : config.nsfwCropFrameCount);
+                }
+                for (const suspicious of suspiciousFrames) {
+                    const sourceFrame = frames[suspicious.frameIndex];
+                    for (const variant of buildAugmentedFrameVariants({
+                        buffer: sourceFrame?.buffer || sourceFrame,
+                        timestamp: sourceFrame?.timestamp,
+                        frameIndex: suspicious.frameIndex,
+                    })) {
+                        try {
+                            result.frames.push(await classifyNsfwFrame({
+                                buffer: variant.buffer,
+                                timestamp: variant.timestamp,
+                            }, suspicious.frameIndex, variant.region));
+                            result.regionScans += 1;
+                        } catch (error) {
+                            console.log(`[STICKER SAFETY] NSFW augment failed: ${shortError(error)}`);
+                        }
+                    }
+                    for (const region of buildNsfwRegions(sourceFrame, config.nsfwMaxRegions)) {
+                        try {
+                            result.frames.push(await classifyNsfwFrame({
+                                buffer: region.buffer,
+                                timestamp: sourceFrame?.timestamp,
+                            }, suspicious.frameIndex, region.name));
+                            result.regionScans += 1;
+                        } catch (error) {
+                            console.log(`[STICKER SAFETY] NSFW crop failed: ${shortError(error)}`);
+                        }
+                    }
+                }
+                decision = evaluateNsfwPredictions(result.frames, options);
+            }
+
+            if (!decision.violation) {
+                const exposureDecision = evaluateExposureHeuristics(result.frames, frames, options);
+                if (exposureDecision?.violation) decision = exposureDecision;
+            }
+            localDecision = decision;
         }
 
-        if (!decision.violation) {
-            const exposureDecision = evaluateExposureHeuristics(result.frames, frames, options);
-            if (exposureDecision?.violation) decision = exposureDecision;
+        Object.assign(result, localDecision);
+        const localAvailable = result.localVision?.available === true;
+        const classifierAvailable = result.primaryFrames > 0;
+        result.available = localAvailable || classifierAvailable;
+        if (!result.available && !result.violation) {
+            result.error = [
+                ...(result.localVision?.errors || []),
+                nsfwDetail,
+            ].filter(Boolean).join(" | ") || "semua engine NSFW tidak tersedia";
+            result.reason = "all-nsfw-engines-unavailable";
         }
 
-        Object.assign(result, decision);
         nsfwRuntimeStats = {
             lastScanAt: Date.now(),
-            lastResult: decision.violation ? "violation" : "clean",
-            lastCategory: decision.category || null,
-            lastConfidence: Number(decision.confidence || 0),
-            lastFrames: result.primaryFrames,
+            lastResult: result.violation ? "violation" : result.available ? "clean" : "error",
+            lastCategory: result.category || null,
+            lastConfidence: Number(result.confidence || 0),
+            lastFrames: Math.max(result.primaryFrames, result.localVision?.nudeNet?.frames?.length || 0, result.localVision?.vit?.frames?.length || 0),
             lastRegions: result.regionScans,
             lastDurationMs: Date.now() - startedAt,
-            lastReason: decision.reason || "",
+            lastReason: result.reason || "",
         };
         return result;
     } catch (error) {
         result.available = false;
         result.error = shortError(error);
+        result.reason = "nsfw-pipeline-error";
         nsfwRuntimeStats = {
             lastScanAt: Date.now(),
             lastResult: "error",
@@ -1371,12 +1559,17 @@ async function inspectStickerNsfw(frames, options = {}) {
             lastDurationMs: Date.now() - startedAt,
             lastReason: result.error,
         };
-        console.log(`[STICKER SAFETY] NSFW model unavailable: ${result.error}`);
+        console.log(`[STICKER SAFETY] NSFW pipeline unavailable: ${result.error}`);
         return result;
     }
 }
+
 async function warmupNsfwModel() {
-    await getNsfwModel();
+    const tasks = [getNsfwModel()];
+    try {
+        tasks.push(getLocalNsfwVision().warmup());
+    } catch {}
+    await Promise.allSettled(tasks);
     return getStickerSafetyHealth();
 }
 
@@ -1448,18 +1641,26 @@ async function inspectSticker(sock, msg, options = {}) {
         const textViolation = Boolean(effective.textEnabled && ocr?.badWords?.length);
         const nsfwViolation = Boolean(effective.nsfwEnabled && nsfw?.violation);
         const violationType = nsfwViolation ? "nsfw" : textViolation ? "text" : null;
+        const indeterminate = Boolean(effective.nsfwEnabled && nsfw?.available === false && !nsfwViolation);
         const result = {
             type: frameSet.type,
+            decoder: frameSet.decoder,
+            sourceFrames: frameSet.sourceFrameCount,
+            sampleIndices: frameSet.sampleIndices || [],
             frames: frames.length,
             ocr,
             nsfw,
+            indeterminate,
             violation: Boolean(violationType),
             violationType,
         };
 
-        setCacheRecord(cacheKey, {
+        if (!result.indeterminate) setCacheRecord(cacheKey, {
             result: {
                 type: result.type,
+                decoder: result.decoder,
+                sourceFrames: result.sourceFrames,
+                sampleIndices: result.sampleIndices,
                 frames: result.frames,
                 ocr: {
                     available: ocr.available,
@@ -1487,8 +1688,10 @@ async function inspectSticker(sock, msg, options = {}) {
                     region: nsfw.region || "full",
                     reason: nsfw.reason || "",
                     pipelineVersion: nsfw.pipelineVersion || NSFW_PIPELINE_VERSION,
+                    localVision: nsfw.localVision || null,
                     error: nsfw.error || "",
                 },
+                indeterminate: result.indeterminate,
                 violation: result.violation,
                 violationType: result.violationType,
             },
@@ -1746,7 +1949,11 @@ function formatStatus(groupJid = "", context = {}) {
         `OCR: ${health.ocr}`,
         `NSFW AI: ${health.nsfw}`,
         `NSFW Pipeline: ${health.nsfwPipelineVersion}`,
+        `Decoder: ${health.imageMagick}`,
         `Tensor Backend: ${health.tensorBackend}`,
+        `ONNX Runtime: ${health.localVision?.onnxRuntime || "-"}`,
+        `NudeNet: ${health.localVision?.nudeNet || "-"} / model ${health.localVision?.nudeNetModel || "-"}`,
+        `ViT NSFW: ${health.localVision?.vit || "-"} / model ${health.localVision?.vitModel || "-"}`,
         `Frame Sampling: ${health.maxFrames} evenly distributed`,
         `Crop Regions: up to ${health.maxRegions}`,
         `Queue: ${health.queue}`,
@@ -1790,20 +1997,42 @@ function formatHelp() {
 function formatScanResult(result) {
     const frames = result?.nsfw?.frames || [];
     const latestPredictions = result?.nsfw?.predictions || frames[0]?.predictions || {};
+    const local = result?.nsfw?.localVision || {};
+    const nudeNet = local?.nudeNet || {};
+    const vit = local?.vit || {};
+    const strongestDetection = [...(nudeNet.detections || [])]
+        .sort((a, b) => Number(b.score || 0) - Number(a.score || 0))[0];
+    const vitScores = (vit.frames || []).map(item => Number(item.nsfw || 0));
     const percent = value => `${Math.round(Number(value || 0) * 100)}%`;
+    const decisionText = result?.indeterminate
+        ? "SCAN ERROR / INDETERMINATE"
+        : result?.violation
+            ? `${String(result.violationType || "").toUpperCase()} VIOLATION`
+            : "SAFE / NO VIOLATION";
     return [
         "🧪 STICKER SAFETY SCAN",
         "",
         `Type: ${result?.type || "-"}`,
-        `Primary Frames: ${result?.nsfw?.primaryFrames ?? result?.frames ?? 0}`,
+        `Decoder: ${result?.decoder || "-"}`,
+        `Source Frames: ${result?.sourceFrames ?? "-"}`,
+        `Sampled Frames: ${result?.frames ?? 0}`,
+        `Sample Indices: ${(result?.sampleIndices || []).join(", ") || "-"}`,
+        `NSFWJS Primary Frames: ${result?.nsfw?.primaryFrames ?? 0}`,
         `Crop Regions: ${result?.nsfw?.regionScans ?? 0}`,
         `Pipeline: ${result?.nsfw?.pipelineVersion || NSFW_PIPELINE_VERSION}`,
         "",
-        "OCR:",
-        `Text: "${String(result?.ocr?.text || "").slice(0, 700)}"`,
-        `Matched Words: ${(result?.ocr?.badWords || []).length}`,
+        "LOCAL OBJECT DETECTOR:",
+        `NudeNet: ${nudeNet.available ? "READY" : nudeNet.error ? `ERROR (${nudeNet.error})` : "NOT RUN"}`,
+        `NudeNet Frames: ${(nudeNet.frames || []).length}`,
+        `Explicit Detections: ${(nudeNet.explicit || []).length}`,
+        `Strongest: ${strongestDetection ? `${strongestDetection.class} ${percent(strongestDetection.score)} (frame ${strongestDetection.frameIndex ?? "-"})` : "-"}`,
         "",
-        "NSFW/Nudity:",
+        "LOCAL VISION CLASSIFIER:",
+        `ViT: ${vit.available ? "READY" : vit.error ? `ERROR (${vit.error})` : "NOT RUN"}`,
+        `ViT Frames: ${(vit.frames || []).length}`,
+        `ViT Max NSFW: ${percent(Math.max(0, ...vitScores))}`,
+        "",
+        "NSFWJS:",
         `Porn: ${percent(latestPredictions.Porn)}`,
         `Hentai: ${percent(latestPredictions.Hentai)}`,
         `Sexy/Nudity: ${percent(latestPredictions.Sexy)}`,
@@ -1812,8 +2041,13 @@ function formatScanResult(result) {
         `Evidence Frame: ${result?.nsfw?.frameIndex ?? 0}`,
         `Evidence Region: ${result?.nsfw?.region || "full"}`,
         `Reason: ${result?.nsfw?.reason || "-"}`,
+        `NSFW Error: ${result?.nsfw?.error || "-"}`,
         "",
-        `Decision: ${result?.violation ? `${String(result.violationType || "").toUpperCase()} VIOLATION` : "SAFE / NO VIOLATION"}`,
+        "OCR:",
+        `Text: "${String(result?.ocr?.text || "").slice(0, 700)}"`,
+        `Matched Words: ${(result?.ocr?.badWords || []).length}`,
+        "",
+        `Decision: ${decisionText}`,
         `Category: ${result?.nsfw?.category || result?.violationType || "-"}`,
     ].join("\n");
 }
@@ -2023,6 +2257,10 @@ async function disposeStickerSafety() {
     nsfwModel = null;
     nsfwModelPromise = null;
     nsfwStatus = "MISSING";
+    try {
+        if (localNsfwVision?.dispose) await localNsfwVision.dispose();
+    } catch {}
+    localNsfwVision = null;
     if (stateCache) saveState(stateCache);
     if (resultCache) saveResultCache();
     await cleanupStickerSafety();
@@ -2036,6 +2274,12 @@ function getStickerSafetyHealth() {
     } catch {}
     const effective = getEffectiveConfig("");
     const runtime = getRuntimeConfig();
+    let localVisionHealth = null;
+    try {
+        localVisionHealth = getLocalNsfwVision().getHealth();
+    } catch (error) {
+        localVisionHealth = { onnxRuntime: `ERROR (${shortError(error)})`, nudeNet: "ERROR", vit: "ERROR" };
+    }
     return {
         enabled: effective.enabled,
         textEnabled: effective.textEnabled,
@@ -2048,6 +2292,8 @@ function getStickerSafetyHealth() {
         nsfwDetail,
         nsfwPipelineVersion: NSFW_PIPELINE_VERSION,
         tensorBackend: tfBackendName,
+        imageMagick: imageMagickStatus === "READY" && imageMagickDetail ? `READY (${imageMagickDetail})` : imageMagickStatus,
+        localVision: localVisionHealth,
         maxFrames: runtime.maxFrames,
         maxRegions: runtime.nsfwMaxRegions,
         thresholds: {
@@ -2084,6 +2330,8 @@ module.exports = {
     inspectStickerNsfw,
     extractStickerFrames,
     buildEvenSampleTimestamps,
+    buildEvenSampleIndices,
+    resolveImageMagickCommand,
     probeMediaDuration,
     preprocessFrameForOcr,
     normalizeOcrText,
