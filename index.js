@@ -63,6 +63,7 @@ const antiToxicStickerOcr = require("./modules/antiToxicStickerOcr");
 const antiToxicControl = require("./modules/antiToxicControl");
 const antiToxicReflectionConfig = require("./modules/antiToxicReflectionConfig");
 const groupRemoteControl = require("./modules/groupRemoteControl");
+const groupWelcome = require("./modules/groupWelcome");
 const lidAliasStore = require("./modules/lidAliasStore");
 const extendedDownloader = require("./modules/extendedDownloader");
 const fakeVn = require("./modules/fakeVn");
@@ -995,6 +996,7 @@ function unwrapBasicMessageForAntiToxic(message) {
 function getAntiToxicPipelineText(msg) {
     const message = unwrapBasicMessageForAntiToxic(msg?.message || {})
     return String(
+        groupWelcome.extractInteractiveSelection(message) ||
         message.conversation ||
         message.extendedTextMessage?.text ||
         message.imageMessage?.caption ||
@@ -2803,6 +2805,9 @@ async function startBot() {
     wrapSendMessageForGroups(sock)
     wrapSendMessageTracker(sock)
     installGroupMetadataCacheInvalidation(sock)
+    groupWelcome.installGroupWelcome(sock, {
+        groupRemoteControl,
+    })
     installPhoneNumberAliasTracker(sock)
     reactionWorkflow.installReactionWorkflow(sock, {
         isOwnerJid,
@@ -3990,6 +3995,18 @@ async function startBot() {
             })
             return
         }
+
+        const groupWelcomeHandled = isGroup && await routerTrace.run(msg, traceContext, "groupWelcomeMenu", () => groupWelcome.handleGroupWelcomeCommand(sock, msg, {
+            from,
+            text,
+            isGroup,
+            sender: senderJid,
+            senderJid,
+            isOwner: canControlOwner,
+            canControlOwner,
+            groupRemoteControl,
+        }))
+        if (groupWelcomeHandled) return
 
         if (commandText === ".help" || commandText === ".menu") {
             logPrivateLidPipeline("send-help-menu", {
