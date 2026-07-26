@@ -51,7 +51,7 @@ async function run() {
     assert.ok(menuRows.some(row => row.id === ".quiz"))
     assert.ok(menuRows.some(row => row.id === ".tebakangka"))
     assert.ok(menuRows.some(row => row.id === ".suit"))
-    assert.ok(menuRows.some(row => row.id === ".menuteks"))
+    assert.ok(!menuRows.some(row => row.id === ".menuteks" || row.id === ".menutext"))
     assert.ok(!menuRows.some(row => row.id === ".help" || /help menu/i.test(row.title || "")))
 
     assert.strictEqual(groupRemoteControl.canonicalFeatureName("welcome"), "welcome")
@@ -173,16 +173,18 @@ async function run() {
         },
     }
     const mobileMenuResult = await groupWelcome.sendInteractiveMenu(mobileMenuSock, groupJid)
-    assert.strictEqual(mobileMenuResult.mode, "list-message")
+    assert.strictEqual(mobileMenuResult.mode, "mobile-buttons-flow")
     assert.strictEqual(nativeRelayCalled, false)
-    assert.strictEqual(mobileMenuMessages[0].buttonText, "BUKA MENU")
-
-    assert.strictEqual(await groupWelcome.handleGroupWelcomeCommand(commandSock, { key: { remoteJid: groupJid, participant: newMember } }, {
-        ...commandContext,
-        text: ".menuteks",
-    }), true)
-    assert.ok(commandMessages.at(-1).text.includes("MENU GRUP • COMMAND CENTER"))
-    assert.ok(commandMessages.at(-1).text.includes(".tourl"))
+    assert.strictEqual(mobileMenuMessages.length, 1)
+    assert.strictEqual(mobileMenuMessages[0].viewOnce, true)
+    assert.strictEqual(mobileMenuMessages[0].headerType, 1)
+    assert.strictEqual(mobileMenuMessages[0].buttons.length, 1)
+    assert.strictEqual(mobileMenuMessages[0].buttons[0].buttonText.displayText, "BUKA MENU")
+    assert.strictEqual(mobileMenuMessages[0].buttons[0].type, 4)
+    assert.strictEqual(mobileMenuMessages[0].buttons[0].nativeFlowInfo.name, "single_select")
+    const mobileParams = JSON.parse(mobileMenuMessages[0].buttons[0].nativeFlowInfo.paramsJson)
+    assert.strictEqual(mobileParams.title, "BUKA MENU")
+    assert.ok(mobileParams.sections.length >= 3)
 
     assert.strictEqual(await groupWelcome.handleGroupWelcomeCommand(commandSock, { key: { remoteJid: groupJid, participant: newMember } }, {
         ...commandContext,
@@ -204,11 +206,14 @@ async function run() {
 
     const groupWelcomeSource = fs.readFileSync(path.join(__dirname, "..", "modules", "groupWelcome.js"), "utf8")
     assert.ok(groupWelcomeSource.includes('title: "BUKA MENU"'))
-    assert.ok(groupWelcomeSource.includes('buttonText: "BUKA MENU"'))
+    assert.ok(groupWelcomeSource.includes('displayText: "BUKA MENU"'))
+    assert.ok(groupWelcomeSource.includes('type: 4'))
+    assert.ok(groupWelcomeSource.includes('name: "single_select"'))
     assert.ok(!groupWelcomeSource.includes("☰ BUKA MENU"))
+    assert.ok(!groupWelcomeSource.includes(".menuteks"))
     assert.ok(groupWelcomeSource.includes('title: "🎉 WELCOME TO THE GROUP"'))
     assert.ok(!groupWelcome.DEFAULT_TEMPLATE.startsWith("🎉"))
-    assert.ok(groupWelcomeSource.includes("Menu Build: V1.3.4"))
+    assert.ok(groupWelcomeSource.includes("Menu Build: V1.3.5"))
 
     const indexSource = fs.readFileSync(path.join(__dirname, "..", "index.js"), "utf8")
     assert.ok(indexSource.includes("groupWelcome.installGroupWelcome"))

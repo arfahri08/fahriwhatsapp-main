@@ -306,7 +306,6 @@ function buildMenuSections() {
                 { header: "ATURAN", title: "Peraturan Grup", description: "Lihat deskripsi dan aturan grup", id: ".rules" },
                 { header: "ADMIN", title: "Daftar Admin", description: "Lihat seluruh admin grup", id: ".adminlist" },
                 { header: "FITUR", title: "Status Fitur Grup", description: "Cek fitur grup yang sedang aktif", id: ".fiturgrup" },
-                { header: "KOMPATIBEL", title: "Menu Versi Teks", description: "Gunakan jika tombol menu tidak terbuka di HP", id: ".menuteks" },
             ],
         },
         {
@@ -338,26 +337,14 @@ function buildFallbackMenuText(bodyText = "") {
         bodyText || "Akses cepat seluruh fitur grup dalam satu tempat.",
         "",
         "✦ *MENU GRUP • COMMAND CENTER* ✦",
-        "",
-        "👥 *INFORMASI GRUP*",
-        "• `.groupinfo` — informasi grup",
-        "• `.rules` — peraturan grup",
-        "• `.adminlist` — daftar admin",
-        "• `.fiturgrup` — status fitur grup",
-        "",
-        "🧰 *MEDIA TOOLS*",
-        "• `.tourl` — reply media menjadi link URL",
-        "• `.stiker` — gambar/video menjadi stiker",
-        "• `.pdf` — gambar menjadi PDF",
-        "",
-        "🎮 *GAME GRUP*",
-        "• `.quiz` — kuis cepat",
-        "• `.tebakangka` — mulai tebak angka",
-        "• `.suit batu` — suit melawan bot",
-        "• `.truth` / `.dare`",
-        "• `.coinflip` / `.roll`",
-        "",
-        "Menu interaktif: `.menu`",
+        "1. `.groupinfo` — informasi grup",
+        "2. `.rules` — peraturan grup",
+        "3. `.adminlist` — daftar admin",
+        "4. `.fiturgrup` — status fitur grup",
+        "5. `.tourl` — reply gambar untuk upload ke URL",
+        "6. `.quiz` — kuis cepat",
+        "7. `.tebakangka` — mulai tebak angka",
+        "8. `.games` — panduan semua game",
     ].filter(Boolean).join("\n")
 }
 
@@ -393,6 +380,38 @@ function buildMixedNativeFlowBizNode() {
     }
 }
 
+async function sendMobileButtonsFlowMenu(sock, groupJid, options = {}) {
+    const title = String(options.title || "✦ MENU GRUP • COMMAND CENTER ✦")
+    const bodyText = String(options.bodyText || "Akses cepat seluruh fitur grup dalam satu tempat.")
+    const footer = String(options.footer || "Pilih kategori dan jalankan command tanpa mengetik manual")
+    const sections = options.sections || buildMenuSections()
+    const mentions = unique(options.mentionedJid)
+
+    const content = {
+        text: [title, "", bodyText].filter(Boolean).join("\n"),
+        footer,
+        buttons: [
+            {
+                buttonId: "group_menu_mobile",
+                buttonText: { displayText: "BUKA MENU" },
+                type: 4,
+                nativeFlowInfo: {
+                    name: "single_select",
+                    paramsJson: JSON.stringify({
+                        title: "BUKA MENU",
+                        sections,
+                    }),
+                },
+            },
+        ],
+        headerType: 1,
+        viewOnce: true,
+    }
+    if (mentions.length) content.mentions = mentions
+
+    return sock.sendMessage(groupJid, content)
+}
+
 async function sendNativeFlowMenu(sock, groupJid, options = {}) {
     const { generateWAMessageFromContent, proto } = require("@whiskeysockets/baileys")
     if (typeof generateWAMessageFromContent !== "function" || !proto?.Message?.InteractiveMessage) {
@@ -400,8 +419,8 @@ async function sendNativeFlowMenu(sock, groupJid, options = {}) {
     }
 
     const title = String(options.title || "✦ MENU GRUP • COMMAND CENTER ✦")
-    const bodyText = String(options.bodyText || "Akses cepat seluruh fitur grup dalam satu tempat. Jika tombol tidak terbuka di HP, ketik .menuteks.")
-    const footer = String(options.footer || "Mobile-first menu • alternatif: .menuteks")
+    const bodyText = String(options.bodyText || "Akses cepat seluruh fitur grup dalam satu tempat.")
+    const footer = String(options.footer || "Pilih kategori dan jalankan command tanpa mengetik manual")
     const mentionedJid = unique(options.mentionedJid)
     const sections = options.sections || buildMenuSections()
     const interactiveMessage = proto.Message.InteractiveMessage.create({
@@ -456,8 +475,8 @@ async function sendLegacyListMenu(sock, groupJid, options = {}) {
     }))
     return sock.sendMessage(groupJid, {
         title: String(options.title || "✦ MENU GRUP • COMMAND CENTER ✦"),
-        text: String(options.bodyText || "Akses cepat seluruh fitur grup dalam satu tempat. Jika tombol tidak terbuka di HP, ketik .menuteks."),
-        footer: String(options.footer || "Mobile-first menu • alternatif: .menuteks"),
+        text: String(options.bodyText || "Akses cepat seluruh fitur grup dalam satu tempat."),
+        footer: String(options.footer || "Pilih kategori dan jalankan command tanpa mengetik manual"),
         buttonText: "BUKA MENU",
         sections,
         mentions: unique(options.mentionedJid),
@@ -466,14 +485,17 @@ async function sendLegacyListMenu(sock, groupJid, options = {}) {
 
 async function sendInteractiveMenu(sock, groupJid, options = {}) {
     if (options.disableInteractive !== true) {
-        // ListMessage diprioritaskan karena lebih kompatibel dengan aplikasi
-        // WhatsApp Android/iOS dibanding Native Flow single_select tertentu.
+        // Primary path: ButtonsMessage + nativeFlowInfo. This is the same
+        // interactive-list shape commonly rendered by WhatsApp mobile clients.
         try {
-            await sendLegacyListMenu(sock, groupJid, options)
-            console.log("[GROUP MENU] ListMessage terkirim (mobile-first)", { groupJid })
-            return { sent: true, mode: "list-message" }
+            const sent = await sendMobileButtonsFlowMenu(sock, groupJid, options)
+            console.log("[GROUP MENU] Mobile Buttons Flow terkirim", {
+                groupJid,
+                messageId: sent?.key?.id || "-",
+            })
+            return { sent: true, mode: "mobile-buttons-flow", messageId: sent?.key?.id || "" }
         } catch (error) {
-            console.log("[GROUP MENU] ListMessage gagal, coba Native Flow", {
+            console.log("[GROUP MENU] Mobile Buttons Flow gagal, coba Native Flow", {
                 groupJid,
                 error: String(error?.message || error).slice(0, 240),
             })
@@ -487,7 +509,17 @@ async function sendInteractiveMenu(sock, groupJid, options = {}) {
             })
             return { sent: true, mode: "native-flow", messageId: generated?.key?.id || "" }
         } catch (error) {
-            console.log("[GROUP MENU] Native Flow gagal, pakai fallback teks", {
+            console.log("[GROUP MENU] Native Flow gagal, coba ListMessage", {
+                groupJid,
+                error: String(error?.message || error).slice(0, 240),
+            })
+        }
+
+        try {
+            await sendLegacyListMenu(sock, groupJid, options)
+            return { sent: true, mode: "list-message" }
+        } catch (error) {
+            console.log("[GROUP MENU] ListMessage gagal, pakai fallback teks", {
                 groupJid,
                 error: String(error?.message || error).slice(0, 240),
             })
@@ -661,7 +693,7 @@ function formatFeatureStatus(groupJid, groupRemoteControl, botAdmin) {
         `Anti Kasar: ${feature("antiToxic") ? "ON" : "OFF"}`,
         `Sticker Safety: ${feature("stickerSafety") ? "ON" : "OFF"}`,
         `Downloader Command: ${feature("downloader") ? "ON" : "OFF"}`,
-        "Menu Build: V1.3.4",
+        "Menu Build: V1.3.5",
     ].join("\n")
 }
 
@@ -695,17 +727,12 @@ async function handleGroupWelcomeCommand(sock, msg, context = {}) {
     if (compact === ".welcomestatus") text = ".welcome status"
     if (compact === ".welcometest") text = ".welcome test"
     const lower = text.toLowerCase()
-    const commands = [".welcome", ".groupmenu", ".menu", ".help", ".menuteks", ".menutext", ".groupinfo", ".rules", ".adminlist", ".fiturgrup", ".tourlinfo", ".stikerinfo", ".pdfinfo", ".games", ".quiz", ".jawab", ".tebakangka", ".tebak", ".coinflip", ".roll", ".truth", ".dare", ".suit"]
+    const commands = [".welcome", ".groupmenu", ".menu", ".help", ".groupinfo", ".rules", ".adminlist", ".fiturgrup", ".tourlinfo", ".stikerinfo", ".pdfinfo", ".games", ".quiz", ".jawab", ".tebakangka", ".tebak", ".coinflip", ".roll", ".truth", ".dare", ".suit"]
     if (!commands.some(command => lower === command || lower.startsWith(`${command} `))) return false
 
     const groupRemoteControl = context.groupRemoteControl
     const senderJid = normalizeJid(context.senderJid || context.sender || msg?.key?.participant)
     const canControlOwner = Boolean(context.canControlOwner || context.isOwner)
-
-    if (lower === ".menuteks" || lower === ".menutext") {
-        await sock.sendMessage(groupJid, { text: buildFallbackMenuText() })
-        return true
-    }
 
     if (lower === ".menu" || lower === ".groupmenu" || lower === ".help") {
         if (groupRemoteControl?.isGroupFeatureEnabled && !groupRemoteControl.isGroupFeatureEnabled(groupJid, "groupMenu")) {
@@ -714,8 +741,8 @@ async function handleGroupWelcomeCommand(sock, msg, context = {}) {
         }
         const menuResult = await sendInteractiveMenu(sock, groupJid, {
             title: "✦ MENU GRUP • COMMAND CENTER ✦",
-            bodyText: "Akses cepat seluruh fitur grup dalam satu tempat. Jika tombol tidak terbuka di HP, ketik .menuteks.",
-            footer: "Mobile-first menu • alternatif: .menuteks",
+            bodyText: "Akses cepat seluruh fitur grup dalam satu tempat.",
+            footer: "Pilih kategori dan jalankan command tanpa mengetik manual",
         })
         console.log("[GROUP MENU] Command selesai", {
             groupJid,
@@ -1088,6 +1115,7 @@ module.exports = {
     resetGroupConfig,
     saveState,
     sendInteractiveMenu,
+    sendMobileButtonsFlowMenu,
     updateGroupConfig,
     welcomeHelp,
 }
