@@ -8,6 +8,8 @@ const path = require("path")
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "group-welcome-test-"))
 process.env.GROUP_WELCOME_DATA_FILE = path.join(tempRoot, "groupWelcome.json")
 process.env.GROUP_WELCOME_EVENT_DELAY_MS = "0"
+process.env.GROUP_KICK_STICKER_DIR = path.join(tempRoot, "kick-stickers")
+process.env.GROUP_KICK_STICKER_DELAY_MS = "1"
 
 const groupWelcome = require("../modules/groupWelcome")
 const groupRemoteControl = require("../modules/groupRemoteControl")
@@ -51,6 +53,9 @@ async function run() {
     assert.ok(menuRows.some(row => row.id === ".quiz"))
     assert.ok(menuRows.some(row => row.id === ".tebakangka"))
     assert.ok(menuRows.some(row => row.id === ".suit"))
+    assert.ok(menuRows.some(row => row.id === ".ping"))
+    assert.ok(menuRows.some(row => row.id === ".goodbye status"))
+    assert.ok(menuRows.some(row => row.id === ".kicksticker status"))
     assert.ok(!menuRows.some(row => row.id === ".menuteks" || row.id === ".menutext"))
     assert.ok(!menuRows.some(row => row.id === ".help" || /help menu/i.test(row.title || "")))
 
@@ -58,6 +63,8 @@ async function run() {
     assert.strictEqual(groupRemoteControl.canonicalFeatureName("groupmenu"), "groupMenu")
     assert.strictEqual(groupRemoteControl.DEFAULT_FEATURES.welcome, true)
     assert.strictEqual(groupRemoteControl.DEFAULT_FEATURES.groupMenu, true)
+    assert.strictEqual(groupRemoteControl.DEFAULT_FEATURES.goodbye, true)
+    assert.strictEqual(groupRemoteControl.DEFAULT_FEATURES.kickSticker, true)
 
     const groupJid = "120363000000000000@g.us"
     const newMember = "628222222222@s.whatsapp.net"
@@ -244,12 +251,14 @@ async function run() {
     assert.ok(!groupWelcomeSource.includes(".menuteks"))
     assert.ok(groupWelcomeSource.includes('title: "🎉 WELCOME TO THE GROUP"'))
     assert.ok(!groupWelcome.DEFAULT_TEMPLATE.startsWith("🎉"))
-    assert.ok(groupWelcomeSource.includes("Menu Build: V1.3.6"))
+    assert.ok(groupWelcome.DEFAULT_GOODBYE_TEMPLATE.includes("Sampai jumpa"))
+    assert.ok(groupWelcomeSource.includes("Menu Build: V1.4.0"))
 
     const indexSource = fs.readFileSync(path.join(__dirname, "..", "index.js"), "utf8")
     assert.ok(indexSource.includes("groupWelcome.installGroupWelcome"))
     assert.ok(indexSource.includes("groupWelcome.extractInteractiveSelection"))
     assert.ok(indexSource.includes("groupWelcome.handleGroupWelcomeCommand"))
+    assert.ok(indexSource.includes("groupWelcome.buildPingText(msg)"))
     assert.ok(indexSource.includes('handler: "groupAdminGate"'))
     assert.ok(indexSource.includes('reason: "bot-not-admin"'))
     assert.ok(indexSource.includes("groupWelcome.rememberBotIdentityCandidates(sock, msg)"))

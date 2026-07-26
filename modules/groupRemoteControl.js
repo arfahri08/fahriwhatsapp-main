@@ -33,6 +33,10 @@ const FEATURE_ALIASES = {
     menugrup: "groupMenu",
     groupmenu: "groupMenu",
     interactivemenu: "groupMenu",
+    goodbye: "goodbye",
+    groupgoodbye: "goodbye",
+    kicksticker: "kickSticker",
+    stickerkick: "kickSticker",
 }
 const DEFAULT_FEATURES = Object.freeze({
     antiToxic: true,
@@ -46,7 +50,9 @@ const DEFAULT_FEATURES = Object.freeze({
     stickerText: true,
     stickerNsfw: true,
     welcome: true,
+    goodbye: true,
     groupMenu: true,
+    kickSticker: true,
     warning: true,
 })
 
@@ -308,7 +314,9 @@ function formatEffectiveStatus(resolved, config) {
         `Sticker Text: ${featureStatus("stickerText") ? "ON" : "OFF"}`,
         `Sticker NSFW: ${featureStatus("stickerNsfw") ? "ON" : "OFF"}`,
         `Welcome Admin-only: ${featureStatus("welcome") ? "ON" : "OFF"}`,
+        `Goodbye Message: ${featureStatus("goodbye") ? "ON" : "OFF"}`,
         `Menu Interaktif: ${featureStatus("groupMenu") ? "ON" : "OFF"}`,
+        `Kick Sticker: ${featureStatus("kickSticker") ? "ON" : "OFF"}`,
         `Broadcast: ${featureStatus("broadcast") ? "ON" : "OFF"}`,
         "Detect Link Otomatis: PRIVATE ONLY",
         "Auto Reply: PRIVATE ONLY",
@@ -334,7 +342,9 @@ function commandHelp() {
         ".groupctl feature <G001|group_jid> stickertext on/off",
         ".groupctl feature <G001|group_jid> stickernsfw on/off",
         ".groupctl feature <G001|group_jid> welcome on/off",
+        ".groupctl feature <G001|group_jid> goodbye on/off",
         ".groupctl feature <G001|group_jid> groupmenu on/off",
+        ".groupctl feature <G001|group_jid> kicksticker on/off",
         ".groupctl note <G001|group_jid> <catatan>",
         "",
         "Saat Bot group ON, command dan fitur group tetap berjalan sesuai permission/config.",
@@ -439,7 +449,7 @@ async function handleGroupRemoteControlCommand(sock, msg, context = {}) {
             await sock.sendMessage(remoteJid, { text: "Detect Link otomatis private-only dan tidak dapat diaktifkan untuk group." })
             return true
         }
-        if (!new Set(["antiToxic", "editGuardian", "privateWarn", "broadcast", "downloader", "stickerSafety", "stickerText", "stickerNsfw", "welcome", "groupMenu", "warning"]).has(feature)) {
+        if (!new Set(["antiToxic", "editGuardian", "privateWarn", "broadcast", "downloader", "stickerSafety", "stickerText", "stickerNsfw", "welcome", "goodbye", "groupMenu", "kickSticker", "warning"]).has(feature)) {
             await sock.sendMessage(remoteJid, { text: "Fitur group tidak dikenali." })
             return true
         }

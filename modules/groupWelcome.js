@@ -14,8 +14,20 @@ const DEFAULT_TEMPLATE = [
     "Jumlah anggota sekarang: *{member_count}*",
 ].join("\n")
 
+const DEFAULT_GOODBYE_TEMPLATE = [
+    "Sampai jumpa {users}.",
+    "",
+    "Terima kasih sudah menjadi bagian dari *{group}*.",
+    "Jumlah anggota sekarang: *{member_count}*",
+].join("\n")
+
+const KICK_STICKER_DIR = process.env.GROUP_KICK_STICKER_DIR
+    ? path.resolve(process.env.GROUP_KICK_STICKER_DIR)
+    : path.join(__dirname, "..", "data", "groupKickStickers")
+const KICK_STICKER_DELAY_MS = Math.max(300, Number(process.env.GROUP_KICK_STICKER_DELAY_MS || 1200))
+
 const DEFAULT_STATE = Object.freeze({
-    version: 1,
+    version: 2,
     groups: {},
 })
 
@@ -71,6 +83,45 @@ function unique(items) {
     return [...new Set((items || []).map(normalizeJid).filter(Boolean))]
 }
 
+function safeGroupFileName(groupJid) {
+    return normalizeJid(groupJid).replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "group"
+}
+
+function getKickStickerPath(groupJid) {
+    return path.join(KICK_STICKER_DIR, `${safeGroupFileName(groupJid)}.webp`)
+}
+
+function hasKickSticker(groupJid) {
+    try {
+        return fs.statSync(getKickStickerPath(groupJid)).isFile()
+    } catch {
+        return false
+    }
+}
+
+function setKickStickerBuffer(groupJid, buffer) {
+    if (!Buffer.isBuffer(buffer) || buffer.length < 12) throw new Error("Buffer stiker tidak valid")
+    const isWebp = buffer.slice(0, 4).toString("ascii") === "RIFF"
+        && buffer.slice(8, 12).toString("ascii") === "WEBP"
+    if (!isWebp) throw new Error("Media yang direply bukan stiker WebP yang valid")
+    fs.mkdirSync(KICK_STICKER_DIR, { recursive: true })
+    const target = getKickStickerPath(groupJid)
+    const temp = `${target}.tmp-${process.pid}-${Date.now()}`
+    fs.writeFileSync(temp, buffer)
+    fs.renameSync(temp, target)
+    return target
+}
+
+function resetKickSticker(groupJid) {
+    try {
+        fs.unlinkSync(getKickStickerPath(groupJid))
+        return true
+    } catch (error) {
+        if (error?.code === "ENOENT") return false
+        throw error
+    }
+}
+
 function readState() {
     if (stateCache) return stateCache
     try {
@@ -103,9 +154,14 @@ function getGroupConfig(groupJid) {
     const raw = readState().groups[jid]
     return {
         template: String(raw?.template || DEFAULT_TEMPLATE),
+        goodbyeTemplate: String(raw?.goodbyeTemplate || DEFAULT_GOODBYE_TEMPLATE),
+        kickStickerEnabled: raw?.kickStickerEnabled !== false,
+        kickStickerConfigured: hasKickSticker(jid),
+        kickStickerPath: getKickStickerPath(jid),
         updatedAt: raw?.updatedAt || null,
         updatedBy: raw?.updatedBy || null,
         custom: Boolean(raw?.template),
+        goodbyeCustom: Boolean(raw?.goodbyeTemplate),
     }
 }
 
@@ -213,6 +269,21 @@ function normalizeParticipantCandidates(participant) {
     ])
 }
 
+function flattenParticipantJids(participants = []) {
+    const result = []
+    for (const participant of Array.isArray(participants) ? participants : [participants]) {
+        const candidates = normalizeParticipantCandidates(participant)
+        const preferred = candidates.find(value => value.endsWith("@s.whatsapp.net")) || candidates[0]
+        if (preferred) result.push(preferred)
+    }
+    return unique(result)
+}
+
+function getPreferredParticipantJid(participant) {
+    const candidates = normalizeParticipantCandidates(participant)
+    return normalizeJid(participant?.id || participant?.jid || participant?.lid || candidates[0])
+}
+
 function participantMatches(participant, candidates = []) {
     const candidateUsers = new Set(unique(candidates).map(jidUser).filter(Boolean))
     return normalizeParticipantCandidates(participant).some(value => candidateUsers.has(jidUser(value)))
@@ -297,23 +368,137 @@ function renderTemplate(template, values = {}) {
         .replace(/\{member_count\}/gi, String(values.memberCount ?? values.member_count ?? "-"))
 }
 
+function getMessageContextInfo(msg) {
+    const message = unwrapMessage(msg?.message || {})
+    return message.extendedTextMessage?.contextInfo
+        || message.imageMessage?.contextInfo
+        || message.videoMessage?.contextInfo
+        || message.documentMessage?.contextInfo
+        || message.stickerMessage?.contextInfo
+        || {}
+}
+
+function buildQuotedStickerTarget(msg) {
+    const contextInfo = getMessageContextInfo(msg)
+    const quoted = unwrapMessage(contextInfo.quotedMessage || {})
+    if (!quoted.stickerMessage) return null
+    return {
+        key: {
+            remoteJid: msg?.key?.remoteJid,
+            id: contextInfo.stanzaId,
+            participant: contextInfo.participant,
+            fromMe: false,
+        },
+        message: quoted,
+    }
+}
+
+async function downloadQuotedSticker(sock, msg, context = {}) {
+    const target = buildQuotedStickerTarget(msg)
+    if (!target) throw new Error("Reply stiker yang ingin dijadikan stiker kick")
+    const baileys = context.baileys || require("@whiskeysockets/baileys")
+    if (typeof baileys.downloadMediaMessage !== "function") {
+        throw new Error("downloadMediaMessage tidak tersedia")
+    }
+    return baileys.downloadMediaMessage(target, "buffer", {}, {}, {
+        reuploadRequest: sock.updateMediaMessage,
+    })
+}
+
+function normalizePhoneJid(value) {
+    let digits = String(value || "").replace(/[^0-9]/g, "")
+    if (!digits) return ""
+    if (digits.startsWith("0")) digits = `62${digits.slice(1)}`
+    else if (digits.startsWith("8")) digits = `62${digits}`
+    return `${digits}@s.whatsapp.net`
+}
+
+function resolveKickTarget(metadata, msg, text = "") {
+    const contextInfo = getMessageContextInfo(msg)
+    const rawArgument = String(text || "").replace(/^\.kick\b/i, "").trim()
+    const candidates = unique([
+        ...(Array.isArray(contextInfo.mentionedJid) ? contextInfo.mentionedJid : []),
+        contextInfo.participant,
+        normalizePhoneJid(rawArgument),
+    ])
+    for (const candidate of candidates) {
+        const participant = (metadata?.participants || []).find(item => participantMatches(item, [candidate]))
+        if (participant) {
+            return {
+                ok: true,
+                participant,
+                jid: getPreferredParticipantJid(participant),
+                mentionJid: normalizeParticipantCandidates(participant).find(value => value.endsWith("@s.whatsapp.net"))
+                    || normalizeParticipantCandidates(participant)[0],
+            }
+        }
+    }
+    return { ok: false, reason: "target-not-found" }
+}
+
+function toTimestampMs(value) {
+    if (value == null) return 0
+    let numeric = 0
+    try {
+        numeric = Number(value)
+    } catch {
+        numeric = 0
+    }
+    if (!Number.isFinite(numeric) || numeric <= 0) return 0
+    return numeric > 1e12 ? numeric : numeric * 1000
+}
+
+function formatDuration(totalSeconds) {
+    let remaining = Math.max(0, Math.floor(Number(totalSeconds) || 0))
+    const days = Math.floor(remaining / 86400)
+    remaining %= 86400
+    const hours = Math.floor(remaining / 3600)
+    remaining %= 3600
+    const minutes = Math.floor(remaining / 60)
+    const seconds = remaining % 60
+    return [days ? `${days}h` : "", hours ? `${hours}j` : "", minutes ? `${minutes}m` : "", `${seconds}d`]
+        .filter(Boolean)
+        .join(" ")
+}
+
+function buildPingText(msg, now = Date.now()) {
+    const sentAt = toTimestampMs(msg?.messageTimestamp)
+    const latency = sentAt ? Math.max(0, Math.min(999999, now - sentAt)) : 0
+    return [
+        "🏓 *PONG!*",
+        "",
+        `Latency: *${latency} ms*`,
+        `Uptime: *${formatDuration(process.uptime())}*`,
+        "Status: *ONLINE*",
+    ].join("\n")
+}
+
 function buildMenuSections() {
     return [
         {
-            title: "INFORMASI GRUP",
+            title: "GROUP CENTER",
             rows: [
                 { header: "INFO", title: "Informasi Grup", description: "Nama grup, anggota, admin, dan status bot", id: ".groupinfo" },
                 { header: "ATURAN", title: "Peraturan Grup", description: "Lihat deskripsi dan aturan grup", id: ".rules" },
                 { header: "ADMIN", title: "Daftar Admin", description: "Lihat seluruh admin grup", id: ".adminlist" },
                 { header: "FITUR", title: "Status Fitur Grup", description: "Cek fitur grup yang sedang aktif", id: ".fiturgrup" },
+                { header: "PING", title: "Tes Koneksi Bot", description: "Cek latency dan uptime bot", id: ".ping" },
             ],
         },
         {
             title: "MEDIA TOOLS",
             rows: [
-                { header: "UPLOAD", title: "Image to URL", description: "Reply gambar lalu ketik .tourl", id: ".tourlinfo" },
-                { header: "STIKER", title: "Buat Stiker", description: "Ubah gambar atau video menjadi stiker", id: ".stikerinfo" },
+                { header: "UPLOAD", title: "Image to URL", description: "Reply media lalu ketik .tourl", id: ".tourlinfo" },
+                { header: "STIKER", title: "Buat Stiker", description: "Kirim/reply gambar lalu ketik .s", id: ".stikerinfo" },
                 { header: "PDF", title: "Gambar ke PDF", description: "Ubah gambar menjadi dokumen PDF", id: ".pdfinfo" },
+            ],
+        },
+        {
+            title: "ADMIN & MODERASI",
+            rows: [
+                { header: "GOODBYE", title: "Goodbye Message", description: "Cek status pesan anggota keluar", id: ".goodbye status" },
+                { header: "KICK", title: "Stiker Sebelum Kick", description: "Cek stiker yang dikirim sebelum kick", id: ".kicksticker status" },
+                { header: "PANDUAN", title: "Cara Kick Member", description: "Lihat cara reply/mention lalu kick", id: ".kickinfo" },
             ],
         },
         {
@@ -341,10 +526,12 @@ function buildFallbackMenuText(bodyText = "") {
         "2. `.rules` — peraturan grup",
         "3. `.adminlist` — daftar admin",
         "4. `.fiturgrup` — status fitur grup",
-        "5. `.tourl` — reply gambar untuk upload ke URL",
-        "6. `.quiz` — kuis cepat",
-        "7. `.tebakangka` — mulai tebak angka",
-        "8. `.games` — panduan semua game",
+        "5. `.ping` — cek latency dan uptime",
+        "6. `.tourl` — reply media untuk upload ke URL",
+        "7. `.s` — reply/kirim gambar menjadi stiker",
+        "8. `.goodbye status` — status pesan keluar",
+        "9. `.kicksticker status` — status stiker kick",
+        "10. `.games` — panduan semua game",
     ].filter(Boolean).join("\n")
 }
 
@@ -539,18 +726,21 @@ function delay(ms) {
 async function handleParticipantUpdate(sock, update = {}, context = {}) {
     const groupJid = normalizeJid(update?.id)
     const action = String(update?.action || "").toLowerCase()
-    if (!isGroupJid(groupJid) || action !== "add") return { handled: false, reason: "not-add" }
+    if (!isGroupJid(groupJid) || !["add", "remove"].includes(action)) {
+        return { handled: false, reason: "unsupported-action" }
+    }
 
     const groupRemoteControl = context.groupRemoteControl
     if (groupRemoteControl?.isGroupBotEnabled && !groupRemoteControl.isGroupBotEnabled(groupJid)) {
         return { handled: false, reason: "group-bot-off" }
     }
-    if (groupRemoteControl?.isGroupFeatureEnabled && !groupRemoteControl.isGroupFeatureEnabled(groupJid, "welcome")) {
-        return { handled: false, reason: "welcome-off" }
+    const featureName = action === "add" ? "welcome" : "goodbye"
+    if (groupRemoteControl?.isGroupFeatureEnabled && !groupRemoteControl.isGroupFeatureEnabled(groupJid, featureName)) {
+        return { handled: false, reason: `${featureName}-off` }
     }
 
     pruneRecentEvents()
-    const eventKey = makeEventKey(update)
+    const eventKey = makeEventKey({ ...update, participants: flattenParticipantJids(update?.participants) })
     if (context.skipDedupe !== true) {
         if (recentEvents.has(eventKey)) return { handled: false, reason: "duplicate" }
         recentEvents.set(eventKey, Date.now())
@@ -562,30 +752,42 @@ async function handleParticipantUpdate(sock, update = {}, context = {}) {
     try {
         metadata = await sock.groupMetadata(groupJid)
     } catch (error) {
-        console.log("[GROUP WELCOME] Gagal membaca metadata", {
+        console.log(`[GROUP ${featureName.toUpperCase()}] Gagal membaca metadata`, {
             groupJid,
             error: String(error?.message || error).slice(0, 240),
         })
         return { handled: false, reason: "metadata-error" }
     }
 
-    if (!isBotAdmin(metadata, sock)) {
+    if (action === "add" && !isBotAdmin(metadata, sock)) {
         console.log("[GROUP WELCOME] Skip karena bot bukan admin", { groupJid })
         return { handled: false, reason: "bot-not-admin" }
     }
 
     const botUsers = new Set(getBotIdentityCandidates(sock).map(jidUser).filter(Boolean))
-    const participants = unique(update?.participants).filter(jid => (
+    const participants = flattenParticipantJids(update?.participants).filter(jid => (
         context.allowBotParticipant === true || !botUsers.has(jidUser(jid))
     ))
-    if (!participants.length) return { handled: false, reason: "only-bot-added" }
+    if (!participants.length) return { handled: false, reason: "only-bot-participant" }
 
     const mentionedJid = resolveMentionJids(metadata, participants).slice(0, 25)
     const config = getGroupConfig(groupJid)
+    const memberCount = context.memberCountOverride ?? (Array.isArray(metadata?.participants) ? metadata.participants.length : "-")
+
+    if (action === "remove") {
+        const goodbyeText = renderTemplate(config.goodbyeTemplate, {
+            users: mentionedJid,
+            group: metadata?.subject || "grup ini",
+            memberCount,
+        })
+        await sock.sendMessage(groupJid, { text: goodbyeText, mentions: mentionedJid })
+        return { handled: true, reason: "goodbye-sent", mode: "text", participants: mentionedJid }
+    }
+
     const bodyText = renderTemplate(config.template, {
         users: mentionedJid,
         group: metadata?.subject || "grup ini",
-        memberCount: Array.isArray(metadata?.participants) ? metadata.participants.length : "-",
+        memberCount,
     })
     const menuEnabled = !groupRemoteControl?.isGroupFeatureEnabled
         || groupRemoteControl.isGroupFeatureEnabled(groupJid, "groupMenu")
@@ -618,7 +820,7 @@ function installGroupWelcome(sock, context = {}) {
     sock.ev.on("group-participants.update", listener)
     sock.__groupWelcomeInstalled = true
     sock.__groupWelcomeListener = listener
-    console.log("[GROUP WELCOME] Admin-only welcome + interactive menu aktif")
+    console.log("[GROUP LIFECYCLE] Welcome, goodbye, menu, dan kick-sticker aktif")
     return true
 }
 
@@ -674,11 +876,13 @@ function formatFeatureStatus(groupJid, groupRemoteControl, botAdmin) {
         `Bot Grup: ${effective?.botEnabled === false ? "OFF" : "ON"}`,
         `Bot Admin: ${botAdmin ? "YA" : "TIDAK"}`,
         `Welcome: ${feature("welcome") ? "ON" : "OFF"}`,
+        `Goodbye: ${feature("goodbye") ? "ON" : "OFF"}`,
         `Menu Interaktif: ${feature("groupMenu") ? "ON" : "OFF"}`,
+        `Kick Sticker: ${feature("kickSticker") ? "ON" : "OFF"}`,
         `Anti Kasar: ${feature("antiToxic") ? "ON" : "OFF"}`,
         `Sticker Safety: ${feature("stickerSafety") ? "ON" : "OFF"}`,
         `Downloader Command: ${feature("downloader") ? "ON" : "OFF"}`,
-        "Menu Build: V1.3.6",
+        "Menu Build: V1.4.0",
     ].join("\n")
 }
 
@@ -703,6 +907,36 @@ function welcomeHelp() {
     ].join("\n")
 }
 
+function goodbyeHelp() {
+    return [
+        "👋 *GOODBYE MESSAGE*",
+        "",
+        ".goodbye status",
+        ".goodbye on/off",
+        ".goodbye set <pesan>",
+        ".goodbye reset",
+        ".goodbye test",
+        "",
+        "Placeholder: {user}, {users}, {group}, {member_count}",
+    ].join("\n")
+}
+
+function kickStickerHelp() {
+    return [
+        "🥾 *KICK MEMBER + STIKER*",
+        "",
+        "1. Reply stiker lalu ketik `.kicksticker set`",
+        "2. Reply pesan member atau mention member lalu ketik `.kick`",
+        "3. Bot mengirim stiker, menunggu sebentar, lalu mengeluarkan member.",
+        "",
+        ".kicksticker status/on/off/reset/test",
+        ".kick @member",
+        ".kick 08xxxxxxxxxx",
+        "",
+        "Hanya admin grup/owner bot. Bot wajib menjadi admin.",
+    ].join("\n")
+}
+
 async function handleGroupWelcomeCommand(sock, msg, context = {}) {
     const groupJid = normalizeJid(context.from || msg?.key?.remoteJid)
     if (!isGroupJid(groupJid)) return false
@@ -711,8 +945,11 @@ async function handleGroupWelcomeCommand(sock, msg, context = {}) {
     const compact = text.toLowerCase().replace(/\s+/g, "")
     if (compact === ".welcomestatus") text = ".welcome status"
     if (compact === ".welcometest") text = ".welcome test"
+    if (compact === ".goodbyestatus") text = ".goodbye status"
+    if (compact === ".goodbyetest") text = ".goodbye test"
+    if (compact === ".kickstickerstatus") text = ".kicksticker status"
     const lower = text.toLowerCase()
-    const commands = [".welcome", ".groupmenu", ".menu", ".help", ".groupinfo", ".rules", ".adminlist", ".fiturgrup", ".tourlinfo", ".stikerinfo", ".pdfinfo", ".games", ".quiz", ".jawab", ".tebakangka", ".tebak", ".coinflip", ".roll", ".truth", ".dare", ".suit"]
+    const commands = [".welcome", ".goodbye", ".kicksticker", ".kickinfo", ".kick", ".ping", ".groupmenu", ".menu", ".help", ".groupinfo", ".rules", ".adminlist", ".fiturgrup", ".tourlinfo", ".stikerinfo", ".pdfinfo", ".games", ".quiz", ".jawab", ".tebakangka", ".tebak", ".coinflip", ".roll", ".truth", ".dare", ".suit"]
     if (!commands.some(command => lower === command || lower.startsWith(`${command} `))) return false
 
     const groupRemoteControl = context.groupRemoteControl
@@ -735,6 +972,16 @@ async function handleGroupWelcomeCommand(sock, msg, context = {}) {
             senderJid,
             mode: menuResult?.mode || "unknown",
         })
+        return true
+    }
+
+    if (lower === ".ping") {
+        await sock.sendMessage(groupJid, { text: buildPingText(msg) }, { quoted: msg })
+        return true
+    }
+
+    if (lower === ".kickinfo") {
+        await sock.sendMessage(groupJid, { text: kickStickerHelp() }, { quoted: msg })
         return true
     }
 
@@ -804,7 +1051,7 @@ async function handleGroupWelcomeCommand(sock, msg, context = {}) {
 
     if (lower === ".stikerinfo") {
         await sock.sendMessage(groupJid, {
-            text: "🎟️ Kirim gambar/video dengan caption *.stiker* atau reply medianya lalu ketik *.stiker*."
+            text: "🎟️ Kirim gambar/video dengan caption *.s* atau *.stiker*. Bisa juga reply medianya lalu ketik *.s*."
         })
         return true
     }
@@ -988,6 +1235,198 @@ Hasil: *${verdict}*`,
         return true
     }
 
+    const goodbyeParsed = text.match(/^\.goodbye(?:\s+([a-z]+))?(?:\s+([\s\S]*))?$/i)
+    if (goodbyeParsed) {
+        const action = String(goodbyeParsed[1] || "help").toLowerCase()
+        const argument = String(goodbyeParsed[2] || "").trim()
+
+        if (action === "help") {
+            await sock.sendMessage(groupJid, { text: goodbyeHelp() })
+            return true
+        }
+        if (action === "status") {
+            const config = getGroupConfig(groupJid)
+            await sock.sendMessage(groupJid, {
+                text: [
+                    "👋 *GOODBYE STATUS*",
+                    "",
+                    `Goodbye: ${!groupRemoteControl?.isGroupFeatureEnabled || groupRemoteControl.isGroupFeatureEnabled(groupJid, "goodbye") ? "ON" : "OFF"}`,
+                    `Template: ${config.goodbyeCustom ? "CUSTOM" : "DEFAULT"}`,
+                    "",
+                    config.goodbyeTemplate,
+                ].join("\n"),
+            })
+            return true
+        }
+
+        const permission = await requireGroupAdmin(sock, groupJid, senderJid, canControlOwner)
+        if (!permission.allowed) {
+            await sock.sendMessage(groupJid, { text: "Command .goodbye hanya dapat digunakan oleh admin grup atau owner bot." })
+            return true
+        }
+        metadata = permission.metadata || await sock.groupMetadata(groupJid).catch(() => null)
+
+        if (action === "on" || action === "off") {
+            groupRemoteControl?.setFeature?.(groupJid, "goodbye", action === "on", senderJid)
+            await sock.sendMessage(groupJid, { text: `Goodbye message ${action === "on" ? "diaktifkan" : "dinonaktifkan"}.` })
+            return true
+        }
+        if (action === "set") {
+            if (!argument) {
+                await sock.sendMessage(groupJid, { text: "Format: .goodbye set <pesan>. Gunakan \\n untuk pindah baris." })
+                return true
+            }
+            const template = argument.replace(/\\n/g, "\n").slice(0, 2500)
+            updateGroupConfig(groupJid, { goodbyeTemplate: template }, senderJid)
+            await sock.sendMessage(groupJid, { text: `Template goodbye disimpan.\n\n${template}` })
+            return true
+        }
+        if (action === "reset") {
+            updateGroupConfig(groupJid, { goodbyeTemplate: null }, senderJid)
+            await sock.sendMessage(groupJid, { text: "Template goodbye dikembalikan ke default." })
+            return true
+        }
+        if (action === "test") {
+            const testResult = await handleParticipantUpdate(sock, {
+                id: groupJid,
+                action: "remove",
+                participants: [senderJid],
+            }, {
+                ...context,
+                groupRemoteControl,
+                skipDelay: true,
+                skipDedupe: true,
+                allowBotParticipant: true,
+                memberCountOverride: Math.max(0, Number(metadata?.participants?.length || 1) - 1),
+            })
+            if (!testResult?.handled) {
+                await sock.sendMessage(groupJid, { text: `Test goodbye gagal. Alasan: ${testResult?.reason || "unknown"}` })
+            }
+            return true
+        }
+        await sock.sendMessage(groupJid, { text: goodbyeHelp() })
+        return true
+    }
+
+    const kickStickerParsed = text.match(/^\.kicksticker(?:\s+([a-z]+))?$/i)
+    if (kickStickerParsed) {
+        const action = String(kickStickerParsed[1] || "help").toLowerCase()
+        const config = getGroupConfig(groupJid)
+        if (action === "help") {
+            await sock.sendMessage(groupJid, { text: kickStickerHelp() })
+            return true
+        }
+        if (action === "status") {
+            await sock.sendMessage(groupJid, {
+                text: [
+                    "🥾 *KICK STICKER STATUS*",
+                    "",
+                    `Fitur: ${!groupRemoteControl?.isGroupFeatureEnabled || groupRemoteControl.isGroupFeatureEnabled(groupJid, "kickSticker") ? "ON" : "OFF"}`,
+                    `Stiker: ${config.kickStickerConfigured ? "SUDAH DIATUR" : "BELUM DIATUR"}`,
+                    "",
+                    "Atur dengan reply stiker lalu `.kicksticker set`.",
+                ].join("\n"),
+            })
+            return true
+        }
+
+        const permission = await requireGroupAdmin(sock, groupJid, senderJid, canControlOwner)
+        if (!permission.allowed) {
+            await sock.sendMessage(groupJid, { text: "Command .kicksticker hanya dapat digunakan oleh admin grup atau owner bot." })
+            return true
+        }
+
+        if (action === "on" || action === "off") {
+            groupRemoteControl?.setFeature?.(groupJid, "kickSticker", action === "on", senderJid)
+            updateGroupConfig(groupJid, { kickStickerEnabled: action === "on" }, senderJid)
+            await sock.sendMessage(groupJid, { text: `Kick sticker ${action === "on" ? "diaktifkan" : "dinonaktifkan"}.` })
+            return true
+        }
+        if (action === "set") {
+            try {
+                const buffer = await downloadQuotedSticker(sock, msg, context)
+                setKickStickerBuffer(groupJid, buffer)
+                updateGroupConfig(groupJid, { kickStickerEnabled: true }, senderJid)
+                groupRemoteControl?.setFeature?.(groupJid, "kickSticker", true, senderJid)
+                await sock.sendMessage(groupJid, { text: "✅ Stiker sebelum kick berhasil disimpan dan diaktifkan." })
+            } catch (error) {
+                await sock.sendMessage(groupJid, { text: `❌ Gagal menyimpan stiker kick: ${error?.message || error}` })
+            }
+            return true
+        }
+        if (action === "test") {
+            if (!config.kickStickerConfigured) {
+                await sock.sendMessage(groupJid, { text: "Belum ada stiker kick. Reply stiker lalu ketik `.kicksticker set`." })
+                return true
+            }
+            await sock.sendMessage(groupJid, { sticker: fs.readFileSync(config.kickStickerPath) }, { quoted: msg })
+            return true
+        }
+        if (action === "reset") {
+            resetKickSticker(groupJid)
+            updateGroupConfig(groupJid, { kickStickerEnabled: false }, senderJid)
+            groupRemoteControl?.setFeature?.(groupJid, "kickSticker", false, senderJid)
+            await sock.sendMessage(groupJid, { text: "Stiker kick dihapus dan fiturnya dinonaktifkan." })
+            return true
+        }
+        await sock.sendMessage(groupJid, { text: kickStickerHelp() })
+        return true
+    }
+
+    if (lower === ".kick" || lower.startsWith(".kick ")) {
+        const permission = await requireGroupAdmin(sock, groupJid, senderJid, canControlOwner)
+        if (!permission.allowed) {
+            await sock.sendMessage(groupJid, { text: "Command .kick hanya dapat digunakan oleh admin grup atau owner bot." })
+            return true
+        }
+        metadata = permission.metadata || await sock.groupMetadata(groupJid).catch(() => null)
+        if (!metadata || !isBotAdmin(metadata, sock)) {
+            await sock.sendMessage(groupJid, { text: "Bot harus menjadi admin agar dapat mengeluarkan anggota." })
+            return true
+        }
+        if (groupRemoteControl?.isGroupFeatureEnabled && !groupRemoteControl.isGroupFeatureEnabled(groupJid, "kickSticker")) {
+            await sock.sendMessage(groupJid, { text: "Kick sticker sedang OFF. Aktifkan dengan `.kicksticker on`." })
+            return true
+        }
+        const config = getGroupConfig(groupJid)
+        if (!config.kickStickerEnabled || !config.kickStickerConfigured) {
+            await sock.sendMessage(groupJid, { text: "Stiker kick belum diatur. Reply stiker lalu ketik `.kicksticker set`." })
+            return true
+        }
+        const target = resolveKickTarget(metadata, msg, text)
+        if (!target.ok || !target.jid) {
+            await sock.sendMessage(groupJid, { text: "Target tidak ditemukan. Reply pesan member, mention member, atau ketik `.kick 08xxxxxxxxxx`." })
+            return true
+        }
+        if (participantMatches(target.participant, getBotIdentityCandidates(sock))) {
+            await sock.sendMessage(groupJid, { text: "Bot tidak dapat mengeluarkan dirinya sendiri." })
+            return true
+        }
+        if (participantMatches(target.participant, [senderJid])) {
+            await sock.sendMessage(groupJid, { text: "Kamu tidak dapat menggunakan command ini untuk mengeluarkan diri sendiri." })
+            return true
+        }
+        if (String(target.participant?.admin || "").toLowerCase() === "superadmin") {
+            await sock.sendMessage(groupJid, { text: "Pemilik grup tidak dapat dikeluarkan." })
+            return true
+        }
+
+        try {
+            await sock.sendMessage(groupJid, { sticker: fs.readFileSync(config.kickStickerPath) }, { quoted: msg })
+            await delay(KICK_STICKER_DELAY_MS)
+            const result = await sock.groupParticipantsUpdate(groupJid, [target.jid], "remove")
+            const failed = Array.isArray(result) && result.find(item => Number(item?.status) >= 400)
+            if (failed) throw new Error(`WhatsApp menolak kick dengan status ${failed.status}`)
+            await sock.sendMessage(groupJid, {
+                text: `✅ ${mentionLabel(target.mentionJid || target.jid)} berhasil dikeluarkan.`,
+                mentions: target.mentionJid ? [target.mentionJid] : [],
+            })
+        } catch (error) {
+            await sock.sendMessage(groupJid, { text: `❌ Gagal mengeluarkan anggota: ${error?.message || error}` })
+        }
+        return true
+    }
+
     const parsed = lower.match(/^\.welcome(?:\s+([a-z]+))?(?:\s+([\s\S]*))?$/i)
     if (!parsed) return false
     const action = String(parsed[1] || "help").toLowerCase()
@@ -1046,7 +1485,7 @@ Hasil: *${verdict}*`,
     }
 
     if (action === "reset") {
-        resetGroupConfig(groupJid)
+        updateGroupConfig(groupJid, { template: null }, senderJid)
         await sock.sendMessage(groupJid, { text: "Template welcome dikembalikan ke default." })
         return true
     }
@@ -1082,8 +1521,12 @@ Hasil: *${verdict}*`,
 module.exports = {
     DATA_FILE,
     DEFAULT_TEMPLATE,
+    DEFAULT_GOODBYE_TEMPLATE,
+    KICK_STICKER_DIR,
     buildFallbackMenuText,
     buildMenuSections,
+    buildPingText,
+    buildQuotedStickerTarget,
     buildMixedNativeFlowBizNode,
     createHarukaStyleInteractiveMessage,
     extractInteractiveSelection,
@@ -1093,6 +1536,7 @@ module.exports = {
     getBotParticipant,
     rememberBotIdentityCandidates,
     getGroupConfig,
+    getKickStickerPath,
     handleGroupWelcomeCommand,
     handleParticipantUpdate,
     installGroupWelcome,
@@ -1100,9 +1544,14 @@ module.exports = {
     isSenderAdmin,
     renderTemplate,
     resetGroupConfig,
+    resetKickSticker,
+    resolveKickTarget,
     saveState,
     sendHarukaStyleNativeFlowMenu,
     sendInteractiveMenu,
+    setKickStickerBuffer,
     updateGroupConfig,
+    goodbyeHelp,
+    kickStickerHelp,
     welcomeHelp,
 }

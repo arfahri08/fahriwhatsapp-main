@@ -326,7 +326,7 @@ function getMessageText(msg) {
 }
 
 function isStickerCommand(text) {
-    return /^\.sti(?:ker|cker)(?:\s|$)/i.test(String(text || "").trim());
+    return /^(?:\.s|\.sti(?:ker|cker))(?:\s|$)/i.test(String(text || "").trim());
 }
 
 function isPackNameCommand(text) {
@@ -472,7 +472,7 @@ async function handleStickerCommand(sock, msg, context = {}) {
     if (!targetMsg) {
         await sock.sendMessage(from, {
             text:
-                "❌ Kirim gambar dengan caption *.stiker* atau reply gambar lalu ketik *.stiker*.\n\n" +
+                "❌ Kirim gambar dengan caption *.s* atau *.stiker*, atau reply gambar lalu ketik *.s*.\n\n" +
                 `Pack aktif: *${getPackName()}*`,
         }, { quoted: msg });
         return true;

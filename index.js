@@ -4065,6 +4065,11 @@ async function startBot() {
             return
         }
 
+        if (!isGroup && commandText === ".ping") {
+            await sock.sendMessage(from, { text: groupWelcome.buildPingText(msg) }, { quoted: msg })
+            return
+        }
+
         const groupWelcomeHandled = isGroup && await routerTrace.run(msg, traceContext, "groupWelcomeMenu", () => groupWelcome.handleGroupWelcomeCommand(sock, msg, {
             from,
             text,
