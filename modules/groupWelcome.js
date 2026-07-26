@@ -37,6 +37,18 @@ const GAME_DARE_PROMPTS = [
 
 const SUIT_CHOICES = ["batu", "gunting", "kertas"]
 
+const QUIZ_QUESTIONS = [
+    { question: "Planet terbesar di Tata Surya adalah...", options: ["A. Bumi", "B. Jupiter", "C. Mars", "D. Venus"], answer: "B", explanation: "Jupiter adalah planet terbesar di Tata Surya." },
+    { question: "Hasil dari 12 × 8 adalah...", options: ["A. 86", "B. 92", "C. 96", "D. 108"], answer: "C", explanation: "12 × 8 = 96." },
+    { question: "Ibu kota Provinsi Jawa Timur adalah...", options: ["A. Malang", "B. Surabaya", "C. Gresik", "D. Sidoarjo"], answer: "B", explanation: "Ibu kota Jawa Timur adalah Surabaya." },
+    { question: "Bahasa utama untuk memberi gaya pada halaman web adalah...", options: ["A. CSS", "B. SQL", "C. Python", "D. Bash"], answer: "A", explanation: "CSS digunakan untuk mengatur tampilan dan gaya halaman web." },
+    { question: "Hewan yang mengalami metamorfosis dari ulat adalah...", options: ["A. Lebah", "B. Kupu-kupu", "C. Belalang", "D. Semut"], answer: "B", explanation: "Ulat berubah menjadi kepompong lalu kupu-kupu." },
+]
+
+const GAME_SESSION_TTL_MS = 10 * 60 * 1000
+const quizSessions = new Map()
+const numberGuessSessions = new Map()
+
 const EVENT_DEDUPE_TTL_MS = 10 * 60 * 1000
 const EVENT_DELAY_MS = Math.max(0, Number(process.env.GROUP_WELCOME_EVENT_DELAY_MS || 1200))
 const recentEvents = new Map()
@@ -266,31 +278,33 @@ function renderTemplate(template, values = {}) {
 function buildMenuSections() {
     return [
         {
-            title: "Informasi Grup",
+            title: "INFORMASI GRUP",
             rows: [
-                { header: "INFO", title: "Informasi Grup", description: "Nama grup, jumlah anggota, dan status bot", id: ".groupinfo" },
-                { header: "ATURAN", title: "Peraturan Grup", description: "Lihat deskripsi atau peraturan grup", id: ".rules" },
-                { header: "ADMIN", title: "Daftar Admin", description: "Lihat admin grup", id: ".adminlist" },
-                { header: "FITUR", title: "Status Fitur Grup", description: "Lihat fitur bot yang aktif", id: ".fiturgrup" },
+                { header: "INFO", title: "Informasi Grup", description: "Nama grup, anggota, admin, dan status bot", id: ".groupinfo" },
+                { header: "ATURAN", title: "Peraturan Grup", description: "Lihat deskripsi dan aturan grup", id: ".rules" },
+                { header: "ADMIN", title: "Daftar Admin", description: "Lihat seluruh admin grup", id: ".adminlist" },
+                { header: "FITUR", title: "Status Fitur Grup", description: "Cek fitur grup yang sedang aktif", id: ".fiturgrup" },
             ],
         },
         {
-            title: "Media Cepat",
+            title: "MEDIA TOOLS",
             rows: [
-                { header: "UPLOAD", title: "Image to URL", description: "Reply gambar/stiker/video lalu ketik .tourl", id: ".tourlinfo" },
-                { header: "STIKER", title: "Buat Stiker", description: "Kirim gambar/video dengan caption .stiker", id: ".stikerinfo" },
-                { header: "PDF", title: "Gambar ke PDF", description: "Kirim gambar atau reply gambar lalu ketik .pdf", id: ".pdfinfo" },
+                { header: "UPLOAD", title: "Image to URL", description: "Reply gambar lalu ketik .tourl", id: ".tourlinfo" },
+                { header: "STIKER", title: "Buat Stiker", description: "Ubah gambar atau video menjadi stiker", id: ".stikerinfo" },
+                { header: "PDF", title: "Gambar ke PDF", description: "Ubah gambar menjadi dokumen PDF", id: ".pdfinfo" },
             ],
         },
         {
-            title: "Game Seru",
+            title: "GAME ZONE",
             rows: [
-                { header: "GAMES", title: "Daftar Game", description: "Lihat game ringan yang tersedia", id: ".games" },
+                { header: "GAME", title: "Kuis Cepat", description: "Jawab soal pilihan ganda", id: ".quiz" },
+                { header: "GAME", title: "Tebak Angka", description: "Tebak angka rahasia dari 1 sampai 20", id: ".tebakangka" },
+                { header: "GAME", title: "Suit", description: "Batu, gunting, atau kertas melawan bot", id: ".suit" },
+                { header: "GAME", title: "Truth", description: "Ambil pertanyaan truth secara acak", id: ".truth" },
+                { header: "GAME", title: "Dare", description: "Ambil tantangan dare secara acak", id: ".dare" },
                 { header: "GAME", title: "Coin Flip", description: "Lempar koin virtual", id: ".coinflip" },
-                { header: "GAME", title: "Roll Dice", description: "Acak angka dadu 1-6", id: ".roll" },
-                { header: "GAME", title: "Truth", description: "Ambil pertanyaan truth acak", id: ".truth" },
-                { header: "GAME", title: "Dare", description: "Ambil tantangan dare acak", id: ".dare" },
-                { header: "GAME", title: "Suit Random", description: "Bot memilih batu/gunting/kertas", id: ".suit" },
+                { header: "GAME", title: "Roll Dice", description: "Acak angka dadu 1 sampai 6", id: ".roll" },
+                { header: "GAMES", title: "Panduan Game", description: "Lihat seluruh command game", id: ".games" },
             ],
         },
     ]
@@ -300,13 +314,15 @@ function buildFallbackMenuText(bodyText = "") {
     return [
         bodyText,
         "",
-        "✦ *MENU GRUP* ✦",
+        "✦ *MENU GRUP • COMMAND CENTER* ✦",
         "1. `.groupinfo` — informasi grup",
         "2. `.rules` — peraturan grup",
         "3. `.adminlist` — daftar admin",
         "4. `.fiturgrup` — status fitur grup",
-        "5. `.tourl` — reply media untuk upload ke URL",
-        "6. `.games` — daftar game ringan",
+        "5. `.tourl` — reply gambar untuk upload ke URL",
+        "6. `.quiz` — kuis cepat",
+        "7. `.tebakangka` — mulai tebak angka",
+        "8. `.games` — panduan semua game",
     ].filter(Boolean).join("\n")
 }
 
@@ -348,9 +364,9 @@ async function sendNativeFlowMenu(sock, groupJid, options = {}) {
         throw new Error("Baileys InteractiveMessage tidak tersedia")
     }
 
-    const title = String(options.title || "✦ MENU GRUP ✦")
-    const bodyText = String(options.bodyText || "Pilih fitur bot yang ingin digunakan di grup ini.")
-    const footer = String(options.footer || "Tekan ☰ BUKA MENU untuk melihat daftar fitur")
+    const title = String(options.title || "✦ MENU GRUP • COMMAND CENTER ✦")
+    const bodyText = String(options.bodyText || "Akses cepat seluruh fitur grup dalam satu tempat.")
+    const footer = String(options.footer || "Pilih kategori dan jalankan command tanpa mengetik manual")
     const mentionedJid = unique(options.mentionedJid)
     const sections = options.sections || buildMenuSections()
     const interactiveMessage = proto.Message.InteractiveMessage.create({
@@ -404,9 +420,9 @@ async function sendLegacyListMenu(sock, groupJid, options = {}) {
         })),
     }))
     return sock.sendMessage(groupJid, {
-        title: String(options.title || "✦ MENU GRUP ✦"),
-        text: String(options.bodyText || "Pilih fitur bot yang ingin digunakan di grup ini."),
-        footer: String(options.footer || "Tekan ☰ BUKA MENU untuk melihat daftar fitur"),
+        title: String(options.title || "✦ MENU GRUP • COMMAND CENTER ✦"),
+        text: String(options.bodyText || "Akses cepat seluruh fitur grup dalam satu tempat."),
+        footer: String(options.footer || "Pilih kategori dan jalankan command tanpa mengetik manual"),
         buttonText: "☰ BUKA MENU",
         sections,
         mentions: unique(options.mentionedJid),
@@ -521,9 +537,9 @@ async function handleParticipantUpdate(sock, update = {}, context = {}) {
 
     if (menuEnabled) {
         const sent = await sendInteractiveMenu(sock, groupJid, {
-            title: "✦ WELCOME MEMBER BARU ✦",
+            title: "WELCOME TO THE GROUP",
             bodyText,
-            footer: "Selamat bergabung — tekan ☰ BUKA MENU untuk melihat fitur grup",
+            footer: "Baca aturan • Kenalan • Nikmati kebersamaan",
             mentionedJid,
             disableInteractive: context.disableInteractive,
         })
@@ -562,16 +578,34 @@ function pickRandom(items = []) {
     return items[Math.floor(Math.random() * items.length)]
 }
 
+function pruneGameSessions(now = Date.now()) {
+    for (const [key, session] of quizSessions) {
+        if (!session?.createdAt || now - session.createdAt > GAME_SESSION_TTL_MS) quizSessions.delete(key)
+    }
+    for (const [key, session] of numberGuessSessions) {
+        if (!session?.createdAt || now - session.createdAt > GAME_SESSION_TTL_MS) numberGuessSessions.delete(key)
+    }
+}
+
+function normalizeQuizAnswer(value) {
+    const clean = String(value || "").trim().toUpperCase()
+    const match = clean.match(/^[ABCD]/)
+    return match ? match[0] : ""
+}
+
 function buildGamesText() {
     return [
-        "🎮 *GAME GRUP*",
+        "🎮 *GAME ZONE*",
         "",
-        "Game cepat yang bisa dipakai di grup:",
+        "• `.quiz` — mulai kuis pilihan ganda",
+        "• `.jawab <A/B/C/D>` — jawab kuis aktif",
+        "• `.tebakangka` — mulai tebak angka 1-20",
+        "• `.tebak <angka>` — kirim tebakan",
+        "• `.suit <batu|gunting|kertas>` — lawan bot",
+        "• `.truth` — pertanyaan truth acak",
+        "• `.dare` — tantangan dare acak",
         "• `.coinflip` — lempar koin",
         "• `.roll` — acak dadu 1-6",
-        "• `.truth` — truth random",
-        "• `.dare` — dare random",
-        "• `.suit <batu|gunting|kertas>` — lawan bot",
     ].join("\n")
 }
 
@@ -589,6 +623,7 @@ function formatFeatureStatus(groupJid, groupRemoteControl, botAdmin) {
         `Anti Kasar: ${feature("antiToxic") ? "ON" : "OFF"}`,
         `Sticker Safety: ${feature("stickerSafety") ? "ON" : "OFF"}`,
         `Downloader Command: ${feature("downloader") ? "ON" : "OFF"}`,
+        "Menu Build: V1.2.8",
     ].join("\n")
 }
 
@@ -622,7 +657,7 @@ async function handleGroupWelcomeCommand(sock, msg, context = {}) {
     if (compact === ".welcomestatus") text = ".welcome status"
     if (compact === ".welcometest") text = ".welcome test"
     const lower = text.toLowerCase()
-    const commands = [".welcome", ".groupmenu", ".menu", ".help", ".groupinfo", ".rules", ".adminlist", ".fiturgrup", ".tourlinfo", ".stikerinfo", ".pdfinfo", ".games", ".coinflip", ".roll", ".truth", ".dare", ".suit"]
+    const commands = [".welcome", ".groupmenu", ".menu", ".help", ".groupinfo", ".rules", ".adminlist", ".fiturgrup", ".tourlinfo", ".stikerinfo", ".pdfinfo", ".games", ".quiz", ".jawab", ".tebakangka", ".tebak", ".coinflip", ".roll", ".truth", ".dare", ".suit"]
     if (!commands.some(command => lower === command || lower.startsWith(`${command} `))) return false
 
     const groupRemoteControl = context.groupRemoteControl
@@ -635,9 +670,9 @@ async function handleGroupWelcomeCommand(sock, msg, context = {}) {
             return true
         }
         const menuResult = await sendInteractiveMenu(sock, groupJid, {
-            title: "✦ MENU GRUP ✦",
-            bodyText: "Pilih fitur bot yang ingin digunakan di grup ini.",
-            footer: "Tekan ☰ BUKA MENU untuk memilih fitur",
+            title: "✦ MENU GRUP • COMMAND CENTER ✦",
+            bodyText: "Akses cepat seluruh fitur grup dalam satu tempat.",
+            footer: "Pilih kategori lalu jalankan command yang kamu butuhkan",
         })
         console.log("[GROUP MENU] Command selesai", {
             groupJid,
@@ -727,6 +762,108 @@ async function handleGroupWelcomeCommand(sock, msg, context = {}) {
 
     if (lower === ".games") {
         await sock.sendMessage(groupJid, { text: buildGamesText() })
+        return true
+    }
+
+    pruneGameSessions()
+
+    if (lower === ".quiz") {
+        const question = pickRandom(QUIZ_QUESTIONS)
+        quizSessions.set(groupJid, {
+            ...question,
+            createdAt: Date.now(),
+            startedBy: senderJid,
+        })
+        await sock.sendMessage(groupJid, {
+            text: [
+                "🧠 *KUIS CEPAT*",
+                "",
+                question.question,
+                "",
+                ...question.options,
+                "",
+                "Jawab dengan: *.jawab A* / *.jawab B* / *.jawab C* / *.jawab D*",
+                "Waktu menjawab: 10 menit.",
+            ].join("\n"),
+        })
+        return true
+    }
+
+    if (lower === ".jawab" || lower.startsWith(".jawab ")) {
+        const session = quizSessions.get(groupJid)
+        if (!session) {
+            await sock.sendMessage(groupJid, { text: "Belum ada kuis aktif. Mulai dengan *.quiz*." })
+            return true
+        }
+        const answer = normalizeQuizAnswer(text.replace(/^\.jawab/i, ""))
+        if (!answer) {
+            await sock.sendMessage(groupJid, { text: "Format jawaban: *.jawab A* sampai *.jawab D*." })
+            return true
+        }
+        quizSessions.delete(groupJid)
+        const correct = answer === session.answer
+        await sock.sendMessage(groupJid, {
+            text: [
+                correct ? "✅ *JAWABAN BENAR!*" : "❌ *JAWABAN BELUM TEPAT*",
+                "",
+                `Jawaban kamu: *${answer}*`,
+                `Jawaban benar: *${session.answer}*`,
+                session.explanation,
+            ].join("\n"),
+        })
+        return true
+    }
+
+    if (lower === ".tebakangka") {
+        const secret = Math.floor(Math.random() * 20) + 1
+        numberGuessSessions.set(groupJid, {
+            secret,
+            attempts: 0,
+            createdAt: Date.now(),
+            startedBy: senderJid,
+        })
+        await sock.sendMessage(groupJid, {
+            text: [
+                "🔢 *TEBAK ANGKA*",
+                "",
+                "Bot sudah memilih angka rahasia dari *1 sampai 20*.",
+                "Kirim tebakan dengan: *.tebak <angka>*",
+                "Maksimal 5 percobaan dalam 10 menit.",
+            ].join("\n"),
+        })
+        return true
+    }
+
+    if (lower === ".tebak" || lower.startsWith(".tebak ")) {
+        const session = numberGuessSessions.get(groupJid)
+        if (!session) {
+            await sock.sendMessage(groupJid, { text: "Belum ada permainan tebak angka. Mulai dengan *.tebakangka*." })
+            return true
+        }
+        const guessed = Number(String(text).replace(/^\.tebak/i, "").trim())
+        if (!Number.isInteger(guessed) || guessed < 1 || guessed > 20) {
+            await sock.sendMessage(groupJid, { text: "Masukkan angka 1 sampai 20. Contoh: *.tebak 7*." })
+            return true
+        }
+        session.attempts += 1
+        if (guessed === session.secret) {
+            numberGuessSessions.delete(groupJid)
+            await sock.sendMessage(groupJid, {
+                text: `🎉 *TEPAT!* Angka rahasianya adalah *${session.secret}*. Kamu berhasil dalam *${session.attempts} percobaan*.`
+            })
+            return true
+        }
+        if (session.attempts >= 5) {
+            numberGuessSessions.delete(groupJid)
+            await sock.sendMessage(groupJid, {
+                text: `Game selesai. Kesempatan habis. Angka rahasianya adalah *${session.secret}*.`
+            })
+            return true
+        }
+        numberGuessSessions.set(groupJid, session)
+        await sock.sendMessage(groupJid, {
+            text: `${guessed < session.secret ? "Terlalu kecil" : "Terlalu besar"}. Sisa kesempatan: *${5 - session.attempts}*.`
+        })
         return true
     }
 

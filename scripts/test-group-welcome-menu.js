@@ -43,9 +43,15 @@ async function run() {
     assert.strictEqual(rendered, "Halo @628111111111 di Tes Grup, anggota 10")
 
     const sections = groupWelcome.buildMenuSections()
-    assert.ok(sections.length >= 2)
-    assert.ok(sections.flatMap(section => section.rows).some(row => row.id === ".rules"))
-    assert.ok(sections.flatMap(section => section.rows).some(row => row.id === ".fiturgrup"))
+    assert.ok(sections.length >= 3)
+    const menuRows = sections.flatMap(section => section.rows)
+    assert.ok(menuRows.some(row => row.id === ".rules"))
+    assert.ok(menuRows.some(row => row.id === ".fiturgrup"))
+    assert.ok(menuRows.some(row => row.id === ".tourlinfo"))
+    assert.ok(menuRows.some(row => row.id === ".quiz"))
+    assert.ok(menuRows.some(row => row.id === ".tebakangka"))
+    assert.ok(menuRows.some(row => row.id === ".suit"))
+    assert.ok(!menuRows.some(row => row.id === ".help" || /help menu/i.test(row.title || "")))
 
     assert.strictEqual(groupRemoteControl.canonicalFeatureName("welcome"), "welcome")
     assert.strictEqual(groupRemoteControl.canonicalFeatureName("groupmenu"), "groupMenu")
@@ -117,6 +123,43 @@ async function run() {
     assert.strictEqual(sentAdmin.length, 1)
     assert.ok(sentAdmin[0][1].text.includes("@628222222222"))
     assert.ok(sentAdmin[0][1].text.includes("Grup Uji"))
+
+    const commandMessages = []
+    const commandSock = {
+        user: { id: botJid },
+        groupMetadata: async () => metadataAdmin,
+        sendMessage: async (_jid, content) => {
+            commandMessages.push(content)
+            return { key: { id: `CMD-${commandMessages.length}` } }
+        },
+    }
+    const commandContext = {
+        from: groupJid,
+        isGroup: true,
+        senderJid: newMember,
+        groupRemoteControl: {
+            isGroupFeatureEnabled: () => true,
+            getEffectiveGroupConfig: () => ({ botEnabled: true }),
+        },
+    }
+
+    assert.strictEqual(await groupWelcome.handleGroupWelcomeCommand(commandSock, { key: { remoteJid: groupJid, participant: newMember } }, {
+        ...commandContext,
+        text: ".quiz",
+    }), true)
+    assert.ok(commandMessages.at(-1).text.includes("KUIS CEPAT"))
+
+    assert.strictEqual(await groupWelcome.handleGroupWelcomeCommand(commandSock, { key: { remoteJid: groupJid, participant: newMember } }, {
+        ...commandContext,
+        text: ".jawab A",
+    }), true)
+    assert.ok(/JAWABAN/.test(commandMessages.at(-1).text))
+
+    assert.strictEqual(await groupWelcome.handleGroupWelcomeCommand(commandSock, { key: { remoteJid: groupJid, participant: newMember } }, {
+        ...commandContext,
+        text: ".tebakangka",
+    }), true)
+    assert.ok(commandMessages.at(-1).text.includes("TEBAK ANGKA"))
 
     const indexSource = fs.readFileSync(path.join(__dirname, "..", "index.js"), "utf8")
     assert.ok(indexSource.includes("groupWelcome.installGroupWelcome"))
