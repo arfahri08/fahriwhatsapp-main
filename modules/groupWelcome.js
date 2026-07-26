@@ -280,6 +280,38 @@ function buildFallbackMenuText(bodyText = "") {
     ].filter(Boolean).join("\n")
 }
 
+function getPrivacyModeTs() {
+    const offset = 77980457
+    return String(Math.floor(Date.now() / 1000) - offset)
+}
+
+function buildMixedNativeFlowBizNode() {
+    return {
+        tag: "biz",
+        attrs: {
+            actual_actors: "2",
+            host_storage: "2",
+            privacy_mode_ts: getPrivacyModeTs(),
+        },
+        content: [
+            {
+                tag: "interactive",
+                attrs: { type: "native_flow", v: "1" },
+                content: [
+                    {
+                        tag: "native_flow",
+                        attrs: { v: "9", name: "mixed" },
+                    },
+                ],
+            },
+            {
+                tag: "quality_control",
+                attrs: { source_type: "third_party" },
+            },
+        ],
+    }
+}
+
 async function sendNativeFlowMenu(sock, groupJid, options = {}) {
     const { generateWAMessageFromContent, proto } = require("@whiskeysockets/baileys")
     if (typeof generateWAMessageFromContent !== "function" || !proto?.Message?.InteractiveMessage) {
@@ -322,21 +354,13 @@ async function sendNativeFlowMenu(sock, groupJid, options = {}) {
         }),
     })
 
-    const content = {
-        viewOnceMessage: {
-            message: {
-                messageContextInfo: {
-                    deviceListMetadata: {},
-                    deviceListMetadataVersion: 2,
-                },
-                interactiveMessage,
-            },
-        },
-    }
-    const generated = generateWAMessageFromContent(groupJid, content, {
+    const generated = generateWAMessageFromContent(groupJid, { interactiveMessage }, {
         userJid: sock?.user?.id,
     })
-    await sock.relayMessage(groupJid, generated.message, { messageId: generated.key.id })
+    await sock.relayMessage(groupJid, generated.message, {
+        messageId: generated.key.id,
+        additionalNodes: [buildMixedNativeFlowBizNode()],
+    })
     return generated
 }
 
@@ -362,8 +386,12 @@ async function sendLegacyListMenu(sock, groupJid, options = {}) {
 async function sendInteractiveMenu(sock, groupJid, options = {}) {
     if (options.disableInteractive !== true) {
         try {
-            await sendNativeFlowMenu(sock, groupJid, options)
-            return { sent: true, mode: "native-flow" }
+            const generated = await sendNativeFlowMenu(sock, groupJid, options)
+            console.log("[GROUP MENU] Native Flow terkirim", {
+                groupJid,
+                messageId: generated?.key?.id || "-",
+            })
+            return { sent: true, mode: "native-flow", messageId: generated?.key?.id || "" }
         } catch (error) {
             console.log("[GROUP MENU] Native Flow gagal, coba ListMessage", {
                 groupJid,
@@ -446,7 +474,9 @@ async function handleParticipantUpdate(sock, update = {}, context = {}) {
     }
 
     const botUsers = new Set(getBotIdentityCandidates(sock).map(jidUser).filter(Boolean))
-    const participants = unique(update?.participants).filter(jid => !botUsers.has(jidUser(jid)))
+    const participants = unique(update?.participants).filter(jid => (
+        context.allowBotParticipant === true || !botUsers.has(jidUser(jid))
+    ))
     if (!participants.length) return { handled: false, reason: "only-bot-added" }
 
     const mentionedJid = resolveMentionJids(metadata, participants).slice(0, 25)
@@ -539,7 +569,10 @@ async function handleGroupWelcomeCommand(sock, msg, context = {}) {
     const groupJid = normalizeJid(context.from || msg?.key?.remoteJid)
     if (!isGroupJid(groupJid)) return false
 
-    const text = String(context.text || extractInteractiveSelection(msg) || "").trim()
+    let text = String(context.text || extractInteractiveSelection(msg) || "").trim()
+    const compact = text.toLowerCase().replace(/\s+/g, "")
+    if (compact === ".welcomestatus") text = ".welcome status"
+    if (compact === ".welcometest") text = ".welcome test"
     const lower = text.toLowerCase()
     const commands = [".welcome", ".groupmenu", ".menu", ".groupinfo", ".rules", ".adminlist", ".fiturgrup"]
     if (!commands.some(command => lower === command || lower.startsWith(`${command} `))) return false
@@ -553,9 +586,14 @@ async function handleGroupWelcomeCommand(sock, msg, context = {}) {
             await sock.sendMessage(groupJid, { text: "Menu interaktif sedang dinonaktifkan untuk grup ini." })
             return true
         }
-        await sendInteractiveMenu(sock, groupJid, {
+        const menuResult = await sendInteractiveMenu(sock, groupJid, {
             title: "☰ MENU GRUP",
             bodyText: "Pilih menu yang ingin dibuka.",
+        })
+        console.log("[GROUP MENU] Command selesai", {
+            groupJid,
+            senderJid,
+            mode: menuResult?.mode || "unknown",
         })
         return true
     }
@@ -677,7 +715,7 @@ async function handleGroupWelcomeCommand(sock, msg, context = {}) {
             await sock.sendMessage(groupJid, { text: "Welcome tidak dikirim karena bot belum menjadi admin di grup ini." })
             return true
         }
-        await handleParticipantUpdate(sock, {
+        const testResult = await handleParticipantUpdate(sock, {
             id: groupJid,
             action: "add",
             participants: [senderJid],
@@ -686,7 +724,13 @@ async function handleGroupWelcomeCommand(sock, msg, context = {}) {
             groupRemoteControl,
             skipDelay: true,
             skipDedupe: true,
+            allowBotParticipant: true,
         })
+        if (!testResult?.handled) {
+            await sock.sendMessage(groupJid, {
+                text: `Test welcome gagal dijalankan. Alasan: ${testResult?.reason || "unknown"}`,
+            })
+        }
         return true
     }
 
@@ -699,6 +743,7 @@ module.exports = {
     DEFAULT_TEMPLATE,
     buildFallbackMenuText,
     buildMenuSections,
+    buildMixedNativeFlowBizNode,
     extractInteractiveSelection,
     findCommandId,
     formatFeatureStatus,
