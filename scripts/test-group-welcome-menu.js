@@ -161,10 +161,26 @@ async function run() {
     }), true)
     assert.ok(commandMessages.at(-1).text.includes("TEBAK ANGKA"))
 
+    const groupWelcomeSource = fs.readFileSync(path.join(__dirname, "..", "modules", "groupWelcome.js"), "utf8")
+    assert.ok(groupWelcomeSource.includes('title: "BUKA MENU"'))
+    assert.ok(groupWelcomeSource.includes('buttonText: "BUKA MENU"'))
+    assert.ok(!groupWelcomeSource.includes("☰ BUKA MENU"))
+    assert.ok(groupWelcomeSource.includes('title: "🎉 WELCOME TO THE GROUP"'))
+    assert.ok(!groupWelcome.DEFAULT_TEMPLATE.startsWith("🎉"))
+    assert.ok(groupWelcomeSource.includes("Menu Build: V1.2.9"))
+
     const indexSource = fs.readFileSync(path.join(__dirname, "..", "index.js"), "utf8")
     assert.ok(indexSource.includes("groupWelcome.installGroupWelcome"))
     assert.ok(indexSource.includes("groupWelcome.extractInteractiveSelection"))
     assert.ok(indexSource.includes("groupWelcome.handleGroupWelcomeCommand"))
+    assert.ok(indexSource.includes('handler: "groupAdminGate"'))
+    assert.ok(indexSource.includes('reason: "bot-not-admin"'))
+    assert.ok(indexSource.includes("groupWelcome.isBotAdmin(inboundGroupMetadata, sock)"))
+    const gateIndex = indexSource.indexOf("groupWelcome.isBotAdmin(inboundGroupMetadata, sock)")
+    const stickerSafetyIndex = indexSource.indexOf("stickerSafetyCommandHandled")
+    const antiToxicIndex = indexSource.indexOf("shouldRunAntiToxicForMessage")
+    assert.ok(gateIndex > 0 && gateIndex < stickerSafetyIndex)
+    assert.ok(gateIndex > 0 && gateIndex < antiToxicIndex)
 
     console.log("PASS test-group-welcome-menu")
 }

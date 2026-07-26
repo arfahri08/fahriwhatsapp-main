@@ -383,14 +383,14 @@ async function sendNativeFlowMenu(sock, groupJid, options = {}) {
                     ? proto.Message.InteractiveMessage.NativeFlowMessage.NativeFlowButton.create({
                         name: "single_select",
                         buttonParamsJson: JSON.stringify({
-                            title: "☰ BUKA MENU",
+                            title: "BUKA MENU",
                             sections,
                         }),
                     })
                     : {
                         name: "single_select",
                         buttonParamsJson: JSON.stringify({
-                            title: "☰ BUKA MENU",
+                            title: "BUKA MENU",
                             sections,
                         }),
                     },
@@ -423,7 +423,7 @@ async function sendLegacyListMenu(sock, groupJid, options = {}) {
         title: String(options.title || "✦ MENU GRUP • COMMAND CENTER ✦"),
         text: String(options.bodyText || "Akses cepat seluruh fitur grup dalam satu tempat."),
         footer: String(options.footer || "Pilih kategori dan jalankan command tanpa mengetik manual"),
-        buttonText: "☰ BUKA MENU",
+        buttonText: "BUKA MENU",
         sections,
         mentions: unique(options.mentionedJid),
     })
@@ -537,7 +537,7 @@ async function handleParticipantUpdate(sock, update = {}, context = {}) {
 
     if (menuEnabled) {
         const sent = await sendInteractiveMenu(sock, groupJid, {
-            title: "WELCOME TO THE GROUP",
+            title: "🎉 WELCOME TO THE GROUP",
             bodyText,
             footer: "Baca aturan • Kenalan • Nikmati kebersamaan",
             mentionedJid,
@@ -623,7 +623,7 @@ function formatFeatureStatus(groupJid, groupRemoteControl, botAdmin) {
         `Anti Kasar: ${feature("antiToxic") ? "ON" : "OFF"}`,
         `Sticker Safety: ${feature("stickerSafety") ? "ON" : "OFF"}`,
         `Downloader Command: ${feature("downloader") ? "ON" : "OFF"}`,
-        "Menu Build: V1.2.8",
+        "Menu Build: V1.2.9",
     ].join("\n")
 }
 

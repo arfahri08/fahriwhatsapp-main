@@ -3399,6 +3399,43 @@ async function startBot() {
                 })
                 return
             }
+
+            // Fail closed for every inbound group feature. When the bot is not
+            // an admin (or metadata cannot be read), commands and moderation
+            // engines stay completely silent in that group. Security log event
+            // handlers remain separate and are not changed by this gate.
+            let inboundGroupMetadata = null
+            try {
+                inboundGroupMetadata = await sock.groupMetadata(from)
+            } catch (error) {
+                routerTrace.trace(msg, {
+                    ...traceContext,
+                    policy: "adminRequired",
+                    handler: "groupAdminGate",
+                    skipped: true,
+                    reason: "metadata-unavailable",
+                })
+                console.log("[GROUP ADMIN GATE] Skip seluruh fitur grup karena metadata tidak tersedia", {
+                    groupJid: from,
+                    error: String(error?.message || error).slice(0, 240),
+                })
+                return
+            }
+
+            if (!groupWelcome.isBotAdmin(inboundGroupMetadata, sock)) {
+                routerTrace.trace(msg, {
+                    ...traceContext,
+                    policy: "adminRequired",
+                    handler: "groupAdminGate",
+                    skipped: true,
+                    reason: "bot-not-admin",
+                })
+                console.log("[GROUP ADMIN GATE] Skip seluruh fitur grup karena bot bukan admin", {
+                    groupJid: from,
+                    senderJid,
+                })
+                return
+            }
         }
 
         if (!isGroup && securityMediaLog.isSecurityLogCommand(text)) {
