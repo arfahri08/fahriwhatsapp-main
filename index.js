@@ -126,6 +126,7 @@ const RESTART_EXIT_DELAY_MS = Number(process.env.RESTART_EXIT_DELAY_MS || 3500)
 const RESTART_SEND_TIMEOUT_MS = Number(process.env.RESTART_SEND_TIMEOUT_MS || 15000)
 const RESTART_HELP_EDIT_DELAY_MS = Number(process.env.RESTART_HELP_EDIT_DELAY_MS || 1500)
 const RESTART_WAIT_TEXT = "🔄 Sedang menerapkan perubahan dan me-restart bot. Silakan tunggu sekitar 5-10 detik..."
+// UPT_ORIGIN_ROUTING_BUILD: V1.3.3
 const LID_SEND_STATUS_WAIT_MS = Number(process.env.LID_SEND_STATUS_WAIT_MS || 2500)
 
 function isBroadcastJid(jid) {
@@ -830,7 +831,7 @@ function getDisconnectConflictType(error) {
 }
 
 function shouldEditActiveNoticeToHelp() {
-    return isEnvEnabled(process.env.RESTART_HELP_AFTER_ACTIVE, false)
+    return true
 }
 
 let instanceLockOwned = false
@@ -2602,25 +2603,30 @@ async function editMessageText(sock, jid, key, text, label = "pesan") {
 
 async function showHelpAfterRestart(sock) {
     const notice = consumeRestartNotice()
-    if (!notice) return
+    if (!notice) return false
 
     const age = Date.now() - Number(notice.savedAt || 0)
     if (age > 10 * 60 * 1000) {
         console.log("[RESTART] Abaikan pesan restart lama.")
-        return
+        return false
     }
 
     const activeText = typeof activeNotifier.getActiveText === "function"
         ? activeNotifier.getActiveText()
         : "✅ *USERBOT FAHRI AKTIF*\n\nBot sudah tersambung ke WhatsApp."
 
-    if (!await editMessageText(sock, notice.jid, notice.key, activeText, "pesan restart menjadi aktif")) {
+    let targetKey = notice.key
+    let activeReady = await editMessageText(sock, notice.jid, targetKey, activeText, "pesan restart menjadi aktif")
+
+    if (!activeReady) {
         try {
-            await withSendTimeout(
+            const sentActive = await withSendTimeout(
                 sock.sendMessage(notice.jid, { text: activeText }),
                 RESTART_SEND_TIMEOUT_MS,
                 "send aktif setelah restart"
             )
+            targetKey = sentActive?.key || null
+            activeReady = Boolean(targetKey?.id)
             console.log("[RESTART] Notifikasi aktif dikirim sebagai fallback setelah restart.")
         } catch (error) {
             console.log("[RESTART] Gagal kirim notifikasi aktif setelah restart", {
@@ -2628,28 +2634,20 @@ async function showHelpAfterRestart(sock) {
                 errorMessage: error.message,
                 statusCode: error?.output?.statusCode || error?.statusCode || error?.data?.statusCode || error?.code,
             })
+            return false
         }
-        return
+    } else {
+        console.log("[RESTART] Pesan restart diedit menjadi notifikasi aktif.")
     }
 
-    console.log("[RESTART] Pesan restart diedit menjadi notifikasi aktif.")
-
-    // Grup notification menyimpan status aktif sebagai log permanen; jangan ubah menjadi help menu.
-    if (botNotificationTarget.isBotNotificationGroup(notice.jid)) {
-        return
-    }
-
-    if (!shouldEditActiveNoticeToHelp()) {
-        return
-    }
+    if (!shouldEditActiveNoticeToHelp()) return activeReady
 
     await waitMs(Math.max(0, RESTART_HELP_EDIT_DELAY_MS))
 
     const helpText = help.generateHelpMenu()
-
-    if (await editMessageText(sock, notice.jid, notice.key, helpText, "notifikasi aktif menjadi help menu")) {
-        console.log("[RESTART] Notifikasi aktif diedit menjadi help menu.")
-        return
+    if (targetKey?.id && await editMessageText(sock, notice.jid, targetKey, helpText, "notifikasi aktif menjadi help menu")) {
+        console.log("[RESTART] Notifikasi aktif diedit menjadi help menu pada chat asal command.")
+        return true
     }
 
     try {
@@ -2658,18 +2656,20 @@ async function showHelpAfterRestart(sock) {
             RESTART_SEND_TIMEOUT_MS,
             "send help setelah restart"
         )
-        console.log("[RESTART] Help menu dikirim sebagai fallback setelah restart.")
+        console.log("[RESTART] Help menu dikirim sebagai fallback pada chat asal command.")
+        return true
     } catch (error) {
         console.log("[RESTART] Gagal kirim help menu setelah restart", {
             jid: notice.jid,
             errorMessage: error.message,
             statusCode: error?.output?.statusCode || error?.statusCode || error?.data?.statusCode || error?.code,
         })
+        return false
     }
 }
 
-function getRestartReplyJid(_from) {
-    return botNotificationTarget.getBotNotificationGroupJid()
+function getRestartReplyJid(from) {
+    return String(from || "").trim()
 }
 
 async function sendRestartNotice(sock, jid) {
@@ -2710,9 +2710,22 @@ async function sendRestartNotice(sock, jid) {
     return null
 }
 
-async function editRestartCommandToNotice(sock, _msg, _jid) {
-    // Notifikasi restart selalu dikirim ke grup notification, bukan diedit/dikirim ke PM owner.
-    return sendRestartNotice(sock, botNotificationTarget.getBotNotificationGroupJid())
+async function editRestartCommandToNotice(sock, msg, jid) {
+    const replyJid = getRestartReplyJid(jid || msg?.key?.remoteJid)
+    if (!replyJid) return null
+
+    const commandKey = msg?.key
+    if (commandKey?.id) {
+        const edited = await editMessageText(sock, replyJid, commandKey, RESTART_WAIT_TEXT, "command restart")
+        if (edited) {
+            saveRestartNotice(replyJid, commandKey)
+            console.log("[RESTART] Command diedit menjadi pesan restart pada chat asal.")
+            return { key: commandKey, edited: true }
+        }
+    }
+
+    console.log("[RESTART] Command tidak dapat diedit; kirim pesan restart baru pada chat asal.")
+    return sendRestartNotice(sock, replyJid)
 }
 
 async function startBot() {
@@ -2959,19 +2972,29 @@ async function startBot() {
                 scanIntervalMs: Number(process.env.MEDIA_CLEANUP_SCAN_INTERVAL_MS || 60 * 60 * 1000),
             });
 
-            // Kirim tanda aktif ke PM owner setelah restart / reconnect.
+            // Log aktif tetap dikirim ke target notification yang dikonfigurasi.
+            // Bila target belum diatur, activeNotifier memakai PM owner sebagai fallback.
+            // Respons command .upt/.reset tetap diedit pada chat asal command.
             const commandRestartPending = hasRestartNotice()
             const sendActiveNoticeAndHelp = async () => {
-                const activeNoticePromise = commandRestartPending
-                    ? Promise.resolve([])
-                    : activeNotifier.notifyActive(sock, PRIORITY_USERS, { force: true })
-                await activeNoticePromise
-                    .catch((error) => {
-                        console.log(`[ACTIVE] Error: ${error.message}`)
-                        return []
-                    })
-                    .then(() => showHelpAfterRestart(sock))
-                    .catch((error) => console.log(`[RESTART] Gagal tampilkan help setelah restart: ${error.message}`));
+                await activeNotifier.notifyActive(
+                    sock,
+                    [getOwnerControlJid(), ...PRIORITY_USERS].filter(Boolean),
+                    {
+                        force: true,
+                        reason: commandRestartPending
+                            ? "active-after-command-restart"
+                            : "active-startup-reconnect",
+                    }
+                ).catch((error) => {
+                    console.log(`[ACTIVE] Error: ${error.message}`)
+                    return []
+                })
+
+                if (commandRestartPending) {
+                    await showHelpAfterRestart(sock)
+                        .catch((error) => console.log(`[RESTART] Gagal tampilkan help setelah restart: ${error.message}`))
+                }
             }
             schedulePostOpenTask("notifikasi aktif", commandRestartPending ? 0 : ACTIVE_NOTIFY_DELAY_MS, sendActiveNoticeAndHelp)
         }
