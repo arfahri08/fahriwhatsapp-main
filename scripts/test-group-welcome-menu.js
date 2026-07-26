@@ -160,31 +160,61 @@ async function run() {
         },
     }
 
-    const mobileMenuMessages = []
-    let nativeRelayCalled = false
-    const mobileMenuSock = {
-        user: { id: botJid },
-        sendMessage: async (_jid, content) => {
-            mobileMenuMessages.push(content)
-            return { key: { id: "LIST-MENU" } }
+    const generatedPayloads = []
+    const relayMessages = []
+    const passthrough = value => value
+    const fakeBaileys = {
+        generateWAMessageFromContent: (jid, content, options) => {
+            generatedPayloads.push({ jid, content, options })
+            return {
+                key: { id: "HARUKA-MENU" },
+                message: content,
+            }
         },
-        relayMessage: async () => {
-            nativeRelayCalled = true
+        proto: {
+            Message: {
+                InteractiveMessage: {
+                    create: passthrough,
+                    Body: { create: passthrough },
+                    Footer: { create: passthrough },
+                    Header: { create: passthrough },
+                    NativeFlowMessage: {
+                        create: passthrough,
+                        NativeFlowButton: { create: passthrough },
+                    },
+                },
+            },
         },
     }
-    const mobileMenuResult = await groupWelcome.sendInteractiveMenu(mobileMenuSock, groupJid)
-    assert.strictEqual(mobileMenuResult.mode, "mobile-buttons-flow")
-    assert.strictEqual(nativeRelayCalled, false)
-    assert.strictEqual(mobileMenuMessages.length, 1)
-    assert.strictEqual(mobileMenuMessages[0].viewOnce, true)
-    assert.strictEqual(mobileMenuMessages[0].headerType, 1)
-    assert.strictEqual(mobileMenuMessages[0].buttons.length, 1)
-    assert.strictEqual(mobileMenuMessages[0].buttons[0].buttonText.displayText, "BUKA MENU")
-    assert.strictEqual(mobileMenuMessages[0].buttons[0].type, 4)
-    assert.strictEqual(mobileMenuMessages[0].buttons[0].nativeFlowInfo.name, "single_select")
-    const mobileParams = JSON.parse(mobileMenuMessages[0].buttons[0].nativeFlowInfo.paramsJson)
+    const mobileMenuSock = {
+        user: { id: botJid },
+        relayMessage: async (...args) => {
+            relayMessages.push(args)
+        },
+        sendMessage: async () => {
+            throw new Error("List fallback tidak boleh dipakai pada jalur utama")
+        },
+    }
+    const mobileMenuResult = await groupWelcome.sendInteractiveMenu(mobileMenuSock, groupJid, {
+        baileys: fakeBaileys,
+    })
+    assert.strictEqual(mobileMenuResult.mode, "haruka-native-flow")
+    assert.strictEqual(generatedPayloads.length, 1)
+    assert.strictEqual(relayMessages.length, 1)
+
+    const wrappedMessage = generatedPayloads[0].content.viewOnceMessage.message
+    assert.strictEqual(wrappedMessage.messageContextInfo.deviceListMetadataVersion, 2)
+    assert.deepStrictEqual(wrappedMessage.messageContextInfo.deviceListMetadata, {})
+    const interactive = wrappedMessage.interactiveMessage
+    assert.strictEqual(interactive.header.title, "✦ MENU GRUP • COMMAND CENTER ✦")
+    assert.strictEqual(interactive.nativeFlowMessage.buttons.length, 1)
+    assert.strictEqual(interactive.nativeFlowMessage.buttons[0].name, "single_select")
+    const mobileParams = JSON.parse(interactive.nativeFlowMessage.buttons[0].buttonParamsJson)
     assert.strictEqual(mobileParams.title, "BUKA MENU")
     assert.ok(mobileParams.sections.length >= 3)
+    assert.strictEqual(relayMessages[0][0], groupJid)
+    assert.strictEqual(relayMessages[0][2].messageId, "HARUKA-MENU")
+    assert.ok(Array.isArray(relayMessages[0][2].additionalNodes))
 
     assert.strictEqual(await groupWelcome.handleGroupWelcomeCommand(commandSock, { key: { remoteJid: groupJid, participant: newMember } }, {
         ...commandContext,
@@ -206,14 +236,15 @@ async function run() {
 
     const groupWelcomeSource = fs.readFileSync(path.join(__dirname, "..", "modules", "groupWelcome.js"), "utf8")
     assert.ok(groupWelcomeSource.includes('title: "BUKA MENU"'))
-    assert.ok(groupWelcomeSource.includes('displayText: "BUKA MENU"'))
-    assert.ok(groupWelcomeSource.includes('type: 4'))
     assert.ok(groupWelcomeSource.includes('name: "single_select"'))
+    assert.ok(groupWelcomeSource.includes('viewOnceMessage:'))
+    assert.ok(groupWelcomeSource.includes('deviceListMetadataVersion: 2'))
+    assert.ok(groupWelcomeSource.includes('Haruka-style Native Flow terkirim'))
     assert.ok(!groupWelcomeSource.includes("☰ BUKA MENU"))
     assert.ok(!groupWelcomeSource.includes(".menuteks"))
     assert.ok(groupWelcomeSource.includes('title: "🎉 WELCOME TO THE GROUP"'))
     assert.ok(!groupWelcome.DEFAULT_TEMPLATE.startsWith("🎉"))
-    assert.ok(groupWelcomeSource.includes("Menu Build: V1.3.5"))
+    assert.ok(groupWelcomeSource.includes("Menu Build: V1.3.6"))
 
     const indexSource = fs.readFileSync(path.join(__dirname, "..", "index.js"), "utf8")
     assert.ok(indexSource.includes("groupWelcome.installGroupWelcome"))

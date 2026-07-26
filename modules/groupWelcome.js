@@ -380,41 +380,9 @@ function buildMixedNativeFlowBizNode() {
     }
 }
 
-async function sendMobileButtonsFlowMenu(sock, groupJid, options = {}) {
-    const title = String(options.title || "✦ MENU GRUP • COMMAND CENTER ✦")
-    const bodyText = String(options.bodyText || "Akses cepat seluruh fitur grup dalam satu tempat.")
-    const footer = String(options.footer || "Pilih kategori dan jalankan command tanpa mengetik manual")
-    const sections = options.sections || buildMenuSections()
-    const mentions = unique(options.mentionedJid)
-
-    const content = {
-        text: [title, "", bodyText].filter(Boolean).join("\n"),
-        footer,
-        buttons: [
-            {
-                buttonId: "group_menu_mobile",
-                buttonText: { displayText: "BUKA MENU" },
-                type: 4,
-                nativeFlowInfo: {
-                    name: "single_select",
-                    paramsJson: JSON.stringify({
-                        title: "BUKA MENU",
-                        sections,
-                    }),
-                },
-            },
-        ],
-        headerType: 1,
-        viewOnce: true,
-    }
-    if (mentions.length) content.mentions = mentions
-
-    return sock.sendMessage(groupJid, content)
-}
-
-async function sendNativeFlowMenu(sock, groupJid, options = {}) {
-    const { generateWAMessageFromContent, proto } = require("@whiskeysockets/baileys")
-    if (typeof generateWAMessageFromContent !== "function" || !proto?.Message?.InteractiveMessage) {
+function createHarukaStyleInteractiveMessage(baileys, options = {}) {
+    const { proto } = baileys
+    if (!proto?.Message?.InteractiveMessage) {
         throw new Error("Baileys InteractiveMessage tidak tersedia")
     }
 
@@ -423,12 +391,14 @@ async function sendNativeFlowMenu(sock, groupJid, options = {}) {
     const footer = String(options.footer || "Pilih kategori dan jalankan command tanpa mengetik manual")
     const mentionedJid = unique(options.mentionedJid)
     const sections = options.sections || buildMenuSections()
-    const interactiveMessage = proto.Message.InteractiveMessage.create({
+
+    return proto.Message.InteractiveMessage.create({
         contextInfo: mentionedJid.length ? { mentionedJid } : undefined,
         body: proto.Message.InteractiveMessage.Body.create({ text: bodyText }),
         footer: proto.Message.InteractiveMessage.Footer.create({ text: footer }),
         header: proto.Message.InteractiveMessage.Header.create({
             title,
+            subtitle: "",
             hasMediaAttachment: false,
         }),
         nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
@@ -449,14 +419,41 @@ async function sendNativeFlowMenu(sock, groupJid, options = {}) {
                         }),
                     },
             ],
-            messageParamsJson: "{}",
+            messageParamsJson: JSON.stringify({
+                bottom_sheet: {
+                    in_thread_buttons_limit: 1,
+                    list_title: "MENU GRUP",
+                    button_title: "BUKA MENU",
+                },
+            }),
             messageVersion: 1,
         }),
     })
+}
 
-    const generated = generateWAMessageFromContent(groupJid, { interactiveMessage }, {
+async function sendHarukaStyleNativeFlowMenu(sock, groupJid, options = {}) {
+    const baileys = options.baileys || require("@whiskeysockets/baileys")
+    const { generateWAMessageFromContent } = baileys
+    if (typeof generateWAMessageFromContent !== "function") {
+        throw new Error("generateWAMessageFromContent tidak tersedia")
+    }
+
+    const interactiveMessage = createHarukaStyleInteractiveMessage(baileys, options)
+    const generated = generateWAMessageFromContent(groupJid, {
+        viewOnceMessage: {
+            message: {
+                messageContextInfo: {
+                    deviceListMetadata: {},
+                    deviceListMetadataVersion: 2,
+                },
+                interactiveMessage,
+            },
+        },
+    }, {
         userJid: sock?.user?.id,
+        quoted: options.quoted,
     })
+
     await sock.relayMessage(groupJid, generated.message, {
         messageId: generated.key.id,
         additionalNodes: [buildMixedNativeFlowBizNode()],
@@ -485,31 +482,19 @@ async function sendLegacyListMenu(sock, groupJid, options = {}) {
 
 async function sendInteractiveMenu(sock, groupJid, options = {}) {
     if (options.disableInteractive !== true) {
-        // Primary path: ButtonsMessage + nativeFlowInfo. This is the same
-        // interactive-list shape commonly rendered by WhatsApp mobile clients.
+        // Primary path: the Native Flow is wrapped inside viewOnceMessage with
+        // device metadata. This mirrors the structure used by modern button
+        // builders so WhatsApp mobile and WhatsApp Web receive one consistent
+        // single-select menu payload.
         try {
-            const sent = await sendMobileButtonsFlowMenu(sock, groupJid, options)
-            console.log("[GROUP MENU] Mobile Buttons Flow terkirim", {
-                groupJid,
-                messageId: sent?.key?.id || "-",
-            })
-            return { sent: true, mode: "mobile-buttons-flow", messageId: sent?.key?.id || "" }
-        } catch (error) {
-            console.log("[GROUP MENU] Mobile Buttons Flow gagal, coba Native Flow", {
-                groupJid,
-                error: String(error?.message || error).slice(0, 240),
-            })
-        }
-
-        try {
-            const generated = await sendNativeFlowMenu(sock, groupJid, options)
-            console.log("[GROUP MENU] Native Flow fallback terkirim", {
+            const generated = await sendHarukaStyleNativeFlowMenu(sock, groupJid, options)
+            console.log("[GROUP MENU] Haruka-style Native Flow terkirim", {
                 groupJid,
                 messageId: generated?.key?.id || "-",
             })
-            return { sent: true, mode: "native-flow", messageId: generated?.key?.id || "" }
+            return { sent: true, mode: "haruka-native-flow", messageId: generated?.key?.id || "" }
         } catch (error) {
-            console.log("[GROUP MENU] Native Flow gagal, coba ListMessage", {
+            console.log("[GROUP MENU] Haruka-style Native Flow gagal, coba ListMessage", {
                 groupJid,
                 error: String(error?.message || error).slice(0, 240),
             })
@@ -693,7 +678,7 @@ function formatFeatureStatus(groupJid, groupRemoteControl, botAdmin) {
         `Anti Kasar: ${feature("antiToxic") ? "ON" : "OFF"}`,
         `Sticker Safety: ${feature("stickerSafety") ? "ON" : "OFF"}`,
         `Downloader Command: ${feature("downloader") ? "ON" : "OFF"}`,
-        "Menu Build: V1.3.5",
+        "Menu Build: V1.3.6",
     ].join("\n")
 }
 
@@ -743,6 +728,7 @@ async function handleGroupWelcomeCommand(sock, msg, context = {}) {
             title: "✦ MENU GRUP • COMMAND CENTER ✦",
             bodyText: "Akses cepat seluruh fitur grup dalam satu tempat.",
             footer: "Pilih kategori dan jalankan command tanpa mengetik manual",
+            quoted: msg,
         })
         console.log("[GROUP MENU] Command selesai", {
             groupJid,
@@ -1099,6 +1085,7 @@ module.exports = {
     buildFallbackMenuText,
     buildMenuSections,
     buildMixedNativeFlowBizNode,
+    createHarukaStyleInteractiveMessage,
     extractInteractiveSelection,
     findCommandId,
     formatFeatureStatus,
@@ -1114,8 +1101,8 @@ module.exports = {
     renderTemplate,
     resetGroupConfig,
     saveState,
+    sendHarukaStyleNativeFlowMenu,
     sendInteractiveMenu,
-    sendMobileButtonsFlowMenu,
     updateGroupConfig,
     welcomeHelp,
 }
