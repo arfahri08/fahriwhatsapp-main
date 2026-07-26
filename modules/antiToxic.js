@@ -2098,19 +2098,9 @@ function buildStickerOcrWarningContext(result, fallbackWord = "") {
     const matchedWord = sanitizeStickerOcrWarningWord(result?.matchedWord || fallbackWord);
     if (!matchedWord) return "";
 
-    const rawText = String(result?.matchedRawText || result?.rawTexts?.[0] || "")
-        .replace(/[\r\n\t]+/g, " ")
-        .replace(/\s{2,}/g, " ")
-        .trim()
-        .slice(0, 160);
-    const rawDetail = rawText
-        && normalizeStickerOcrWarningText(rawText) !== normalizeStickerOcrWarningText(matchedWord)
-        ? `\nTeks OCR: "${rawText}"`
-        : "";
-
     return [
         "🧾 *TEKS KASAR PADA STIKER*",
-        `> *Kata terdeteksi:* \`${matchedWord}\`${rawDetail}`,
+        `> *Kata terdeteksi:* \`${matchedWord}\``,
         "",
     ].join("\n");
 }
