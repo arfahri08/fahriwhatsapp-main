@@ -56,6 +56,7 @@ const commandRateLimiter = require("./modules/commandRateLimiter");
 const botBlocklistManager = require("./modules/botBlocklistManager");
 const imageSticker = require("./modules/imageSticker");
 const imageToPdfFeature = require("./modules/imageToPdf");
+const imageToUrl = require("./modules/imageToUrl");
 const calculator = require("./modules/calculator");
 const settings = require("./modules/settings");
 const antiToxic = require("./modules/antiToxic");
@@ -4007,6 +4008,17 @@ async function startBot() {
             groupRemoteControl,
         }))
         if (groupWelcomeHandled) return
+
+        const imageToUrlHandled = await routerTrace.run(msg, traceContext, "imageToUrl", () => imageToUrl.handleImageToUrl(sock, msg, {
+            from,
+            text,
+            isGroup,
+            sender: senderJid,
+            senderJid,
+            isOwner: canControlOwner,
+            canControlOwner,
+        }))
+        if (imageToUrlHandled) return
 
         if (commandText === ".help" || commandText === ".menu") {
             logPrivateLidPipeline("send-help-menu", {

@@ -8,8 +8,6 @@ const DATA_FILE = process.env.GROUP_WELCOME_DATA_FILE
     : path.join(__dirname, "..", "data", "groupWelcome.json")
 
 const DEFAULT_TEMPLATE = [
-    "👋 *SELAMAT DATANG*",
-    "",
     "Halo {users}, selamat datang di *{group}*!",
     "",
     "Silakan baca peraturan dan jaga kenyamanan bersama.",
@@ -20,6 +18,24 @@ const DEFAULT_STATE = Object.freeze({
     version: 1,
     groups: {},
 })
+
+const GAME_TRUTH_PROMPTS = [
+    "Apa kebiasaan kamu yang paling malu kalau teman grup tahu?",
+    "Siapa orang terakhir yang kamu stalk diam-diam?",
+    "Kalau bisa mengulang satu momen memalukan, momen apa itu?",
+    "Apa hal paling random yang pernah kamu lakukan tengah malam?",
+    "Kalau disuruh jujur total, siapa anggota grup yang paling sering kamu perhatikan?",
+]
+
+const GAME_DARE_PROMPTS = [
+    "Kirim voice note 5 detik dengan nada sok serius.",
+    "Ganti foto profil selama 10 menit dengan gambar lucu.",
+    "Sebutkan 3 hal positif tentang anggota grup yang terakhir chat.",
+    "Kirim emoji yang menggambarkan mood kamu sekarang tanpa teks.",
+    "Mention satu teman grup lalu bilang: kamu keren hari ini.",
+]
+
+const SUIT_CHOICES = ["batu", "gunting", "kertas"]
 
 const EVENT_DEDUPE_TTL_MS = 10 * 60 * 1000
 const EVENT_DELAY_MS = Math.max(0, Number(process.env.GROUP_WELCOME_EVENT_DELAY_MS || 1200))
@@ -252,16 +268,29 @@ function buildMenuSections() {
         {
             title: "Informasi Grup",
             rows: [
-                { header: "INFO", title: "Informasi Grup", description: "Nama, jumlah anggota, dan status bot", id: ".groupinfo" },
+                { header: "INFO", title: "Informasi Grup", description: "Nama grup, jumlah anggota, dan status bot", id: ".groupinfo" },
                 { header: "ATURAN", title: "Peraturan Grup", description: "Lihat deskripsi atau peraturan grup", id: ".rules" },
                 { header: "ADMIN", title: "Daftar Admin", description: "Lihat admin grup", id: ".adminlist" },
+                { header: "FITUR", title: "Status Fitur Grup", description: "Lihat fitur bot yang aktif", id: ".fiturgrup" },
             ],
         },
         {
-            title: "Fitur Bot",
+            title: "Media Cepat",
             rows: [
-                { header: "STATUS", title: "Status Fitur Grup", description: "Lihat fitur bot yang aktif", id: ".fiturgrup" },
-                { header: "BANTUAN", title: "Help Menu", description: "Lihat daftar command bot", id: ".help" },
+                { header: "UPLOAD", title: "Image to URL", description: "Reply gambar/stiker/video lalu ketik .tourl", id: ".tourlinfo" },
+                { header: "STIKER", title: "Buat Stiker", description: "Kirim gambar/video dengan caption .stiker", id: ".stikerinfo" },
+                { header: "PDF", title: "Gambar ke PDF", description: "Kirim gambar atau reply gambar lalu ketik .pdf", id: ".pdfinfo" },
+            ],
+        },
+        {
+            title: "Game Seru",
+            rows: [
+                { header: "GAMES", title: "Daftar Game", description: "Lihat game ringan yang tersedia", id: ".games" },
+                { header: "GAME", title: "Coin Flip", description: "Lempar koin virtual", id: ".coinflip" },
+                { header: "GAME", title: "Roll Dice", description: "Acak angka dadu 1-6", id: ".roll" },
+                { header: "GAME", title: "Truth", description: "Ambil pertanyaan truth acak", id: ".truth" },
+                { header: "GAME", title: "Dare", description: "Ambil tantangan dare acak", id: ".dare" },
+                { header: "GAME", title: "Suit Random", description: "Bot memilih batu/gunting/kertas", id: ".suit" },
             ],
         },
     ]
@@ -271,12 +300,13 @@ function buildFallbackMenuText(bodyText = "") {
     return [
         bodyText,
         "",
-        "☰ *MENU GRUP*",
+        "✦ *MENU GRUP* ✦",
         "1. `.groupinfo` — informasi grup",
         "2. `.rules` — peraturan grup",
         "3. `.adminlist` — daftar admin",
         "4. `.fiturgrup` — status fitur grup",
-        "5. `.help` — daftar command bot",
+        "5. `.tourl` — reply media untuk upload ke URL",
+        "6. `.games` — daftar game ringan",
     ].filter(Boolean).join("\n")
 }
 
@@ -318,9 +348,9 @@ async function sendNativeFlowMenu(sock, groupJid, options = {}) {
         throw new Error("Baileys InteractiveMessage tidak tersedia")
     }
 
-    const title = String(options.title || "☰ MENU GRUP")
-    const bodyText = String(options.bodyText || "Tekan tombol di bawah untuk membuka menu.")
-    const footer = String(options.footer || "Pilih menu yang ingin digunakan")
+    const title = String(options.title || "✦ MENU GRUP ✦")
+    const bodyText = String(options.bodyText || "Pilih fitur bot yang ingin digunakan di grup ini.")
+    const footer = String(options.footer || "Tekan ☰ BUKA MENU untuk melihat daftar fitur")
     const mentionedJid = unique(options.mentionedJid)
     const sections = options.sections || buildMenuSections()
     const interactiveMessage = proto.Message.InteractiveMessage.create({
@@ -374,9 +404,9 @@ async function sendLegacyListMenu(sock, groupJid, options = {}) {
         })),
     }))
     return sock.sendMessage(groupJid, {
-        title: String(options.title || "☰ MENU GRUP"),
-        text: String(options.bodyText || "Tekan tombol di bawah untuk membuka menu."),
-        footer: String(options.footer || "Pilih menu yang ingin digunakan"),
+        title: String(options.title || "✦ MENU GRUP ✦"),
+        text: String(options.bodyText || "Pilih fitur bot yang ingin digunakan di grup ini."),
+        footer: String(options.footer || "Tekan ☰ BUKA MENU untuk melihat daftar fitur"),
         buttonText: "☰ BUKA MENU",
         sections,
         mentions: unique(options.mentionedJid),
@@ -491,9 +521,9 @@ async function handleParticipantUpdate(sock, update = {}, context = {}) {
 
     if (menuEnabled) {
         const sent = await sendInteractiveMenu(sock, groupJid, {
-            title: "👋 MEMBER BARU",
+            title: "✦ WELCOME MEMBER BARU ✦",
             bodyText,
-            footer: "Selamat bergabung — tekan tombol untuk membuka menu grup",
+            footer: "Selamat bergabung — tekan ☰ BUKA MENU untuk melihat fitur grup",
             mentionedJid,
             disableInteractive: context.disableInteractive,
         })
@@ -525,6 +555,24 @@ async function requireGroupAdmin(sock, groupJid, senderJid, canControlOwner) {
     if (canControlOwner) return { allowed: true, metadata: await sock.groupMetadata(groupJid).catch(() => null) }
     const metadata = await sock.groupMetadata(groupJid).catch(() => null)
     return { allowed: Boolean(metadata && isSenderAdmin(metadata, senderJid)), metadata }
+}
+
+function pickRandom(items = []) {
+    if (!Array.isArray(items) || !items.length) return "-"
+    return items[Math.floor(Math.random() * items.length)]
+}
+
+function buildGamesText() {
+    return [
+        "🎮 *GAME GRUP*",
+        "",
+        "Game cepat yang bisa dipakai di grup:",
+        "• `.coinflip` — lempar koin",
+        "• `.roll` — acak dadu 1-6",
+        "• `.truth` — truth random",
+        "• `.dare` — dare random",
+        "• `.suit <batu|gunting|kertas>` — lawan bot",
+    ].join("\n")
 }
 
 function formatFeatureStatus(groupJid, groupRemoteControl, botAdmin) {
@@ -574,21 +622,22 @@ async function handleGroupWelcomeCommand(sock, msg, context = {}) {
     if (compact === ".welcomestatus") text = ".welcome status"
     if (compact === ".welcometest") text = ".welcome test"
     const lower = text.toLowerCase()
-    const commands = [".welcome", ".groupmenu", ".menu", ".groupinfo", ".rules", ".adminlist", ".fiturgrup"]
+    const commands = [".welcome", ".groupmenu", ".menu", ".help", ".groupinfo", ".rules", ".adminlist", ".fiturgrup", ".tourlinfo", ".stikerinfo", ".pdfinfo", ".games", ".coinflip", ".roll", ".truth", ".dare", ".suit"]
     if (!commands.some(command => lower === command || lower.startsWith(`${command} `))) return false
 
     const groupRemoteControl = context.groupRemoteControl
     const senderJid = normalizeJid(context.senderJid || context.sender || msg?.key?.participant)
     const canControlOwner = Boolean(context.canControlOwner || context.isOwner)
 
-    if (lower === ".menu" || lower === ".groupmenu") {
+    if (lower === ".menu" || lower === ".groupmenu" || lower === ".help") {
         if (groupRemoteControl?.isGroupFeatureEnabled && !groupRemoteControl.isGroupFeatureEnabled(groupJid, "groupMenu")) {
             await sock.sendMessage(groupJid, { text: "Menu interaktif sedang dinonaktifkan untuk grup ini." })
             return true
         }
         const menuResult = await sendInteractiveMenu(sock, groupJid, {
-            title: "☰ MENU GRUP",
-            bodyText: "Pilih menu yang ingin dibuka.",
+            title: "✦ MENU GRUP ✦",
+            bodyText: "Pilih fitur bot yang ingin digunakan di grup ini.",
+            footer: "Tekan ☰ BUKA MENU untuk memilih fitur",
         })
         console.log("[GROUP MENU] Command selesai", {
             groupJid,
@@ -643,6 +692,105 @@ async function handleGroupWelcomeCommand(sock, msg, context = {}) {
     if (lower === ".fiturgrup") {
         await sock.sendMessage(groupJid, {
             text: formatFeatureStatus(groupJid, groupRemoteControl, Boolean(metadata && isBotAdmin(metadata, sock))),
+        })
+        return true
+    }
+
+    if (lower === ".tourlinfo") {
+        await sock.sendMessage(groupJid, {
+            text: [
+                "🖼️ *IMAGE TO URL*",
+                "",
+                "Cara pakai:",
+                "• reply gambar/stiker/video lalu ketik `.tourl`",
+                "• atau kirim gambar/video dengan caption `.tourl`",
+                "",
+                "Bot akan upload media dan mengirim link hasilnya.",
+            ].join("\n"),
+        })
+        return true
+    }
+
+    if (lower === ".stikerinfo") {
+        await sock.sendMessage(groupJid, {
+            text: "🎟️ Kirim gambar/video dengan caption *.stiker* atau reply medianya lalu ketik *.stiker*."
+        })
+        return true
+    }
+
+    if (lower === ".pdfinfo") {
+        await sock.sendMessage(groupJid, {
+            text: "📄 Kirim gambar dengan caption *.pdf* atau reply gambar lalu ketik *.pdf*."
+        })
+        return true
+    }
+
+    if (lower === ".games") {
+        await sock.sendMessage(groupJid, { text: buildGamesText() })
+        return true
+    }
+
+    if (lower === ".coinflip") {
+        const result = Math.random() < 0.5 ? "HEADS / ANGKA" : "TAILS / GAMBAR"
+        await sock.sendMessage(groupJid, { text: `🪙 *COIN FLIP*
+
+Hasil: *${result}*` })
+        return true
+    }
+
+    if (lower === ".roll") {
+        const value = Math.floor(Math.random() * 6) + 1
+        await sock.sendMessage(groupJid, { text: `🎲 *ROLL DICE*
+
+Angka kamu: *${value}*` })
+        return true
+    }
+
+    if (lower === ".truth") {
+        await sock.sendMessage(groupJid, { text: `🤫 *TRUTH*
+
+${pickRandom(GAME_TRUTH_PROMPTS)}` })
+        return true
+    }
+
+    if (lower === ".dare") {
+        await sock.sendMessage(groupJid, { text: `🔥 *DARE*
+
+${pickRandom(GAME_DARE_PROMPTS)}` })
+        return true
+    }
+
+    if (lower === ".suit" || lower.startsWith(".suit ")) {
+        const choice = String(text.split(/\s+/).slice(1).join(" ") || "").trim().toLowerCase()
+        const normalizedChoice = choice.replace(/[^a-z]/g, "")
+        const botPick = pickRandom(SUIT_CHOICES)
+        if (!normalizedChoice) {
+            await sock.sendMessage(groupJid, {
+                text: `✊ *SUIT*
+
+Format: *.suit batu* / *.suit gunting* / *.suit kertas*
+Bot tadi memilih contoh: *${botPick}*`,
+            })
+            return true
+        }
+        if (!SUIT_CHOICES.includes(normalizedChoice)) {
+            await sock.sendMessage(groupJid, { text: "Pilihan suit hanya: batu, gunting, atau kertas." })
+            return true
+        }
+        let verdict = "SERI"
+        if (normalizedChoice === botPick) verdict = "SERI"
+        else if (
+            (normalizedChoice === "batu" && botPick === "gunting")
+            || (normalizedChoice === "gunting" && botPick === "kertas")
+            || (normalizedChoice === "kertas" && botPick === "batu")
+        ) verdict = "KAMU MENANG"
+        else verdict = "BOT MENANG"
+        await sock.sendMessage(groupJid, {
+            text: `✊ *SUIT*
+
+Pilihan kamu: *${normalizedChoice}*
+Pilihan bot: *${botPick}*
+Hasil: *${verdict}*`,
         })
         return true
     }
