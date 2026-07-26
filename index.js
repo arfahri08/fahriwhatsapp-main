@@ -3423,6 +3423,11 @@ async function startBot() {
                 return
             }
 
+            // Pelajari LID akun userbot dari pesan fromMe agar pengecekan admin
+            // tetap akurat pada grup yang metadata-nya hanya mengembalikan @lid.
+            // Ini penting untuk command yang dikirim dari akun userbot sendiri.
+            if (msg?.key?.fromMe) groupWelcome.rememberBotIdentityCandidates(sock, msg)
+
             // Fail closed for every inbound group feature. When the bot is not
             // an admin (or metadata cannot be read), commands and moderation
             // engines stay completely silent in that group. Security log event
@@ -3445,7 +3450,10 @@ async function startBot() {
                 return
             }
 
-            if (!groupWelcome.isBotAdmin(inboundGroupMetadata, sock)) {
+            const selfIdentityCandidates = msg?.key?.fromMe
+                ? [msg?.key?.participant, msg?.key?.participantAlt, msg?.participant, msg?.participantAlt]
+                : []
+            if (!groupWelcome.isBotAdmin(inboundGroupMetadata, sock, selfIdentityCandidates)) {
                 routerTrace.trace(msg, {
                     ...traceContext,
                     policy: "adminRequired",

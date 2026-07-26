@@ -52,6 +52,7 @@ const numberGuessSessions = new Map()
 const EVENT_DEDUPE_TTL_MS = 10 * 60 * 1000
 const EVENT_DELAY_MS = Math.max(0, Number(process.env.GROUP_WELCOME_EVENT_DELAY_MS || 1200))
 const recentEvents = new Map()
+const learnedBotIdentities = new Set()
 let stateCache = null
 
 function normalizeJid(value) {
@@ -221,23 +222,44 @@ function isAdminParticipant(participant) {
     return ["admin", "superadmin"].includes(String(participant?.admin || "").toLowerCase())
 }
 
-function getBotIdentityCandidates(sock) {
+function getBotIdentityCandidates(sock, extraCandidates = []) {
     return unique([
         sock?.user?.id,
         sock?.user?.lid,
         sock?.user?.jid,
+        sock?.user?.phoneNumber,
+        sock?.user?.pn,
         sock?.authState?.creds?.me?.id,
         sock?.authState?.creds?.me?.lid,
+        sock?.authState?.creds?.me?.phoneNumber,
+        sock?.authState?.creds?.me?.pn,
+        ...learnedBotIdentities,
+        ...(Array.isArray(extraCandidates) ? extraCandidates : [extraCandidates]),
     ])
 }
 
-function getBotParticipant(metadata, sock) {
-    const identities = getBotIdentityCandidates(sock)
+function rememberBotIdentityCandidates(sock, messageOrMsg) {
+    const msg = messageOrMsg?.key ? messageOrMsg : { key: messageOrMsg || {} }
+    const key = msg?.key || {}
+    if (key.fromMe !== true) return getBotIdentityCandidates(sock)
+
+    const candidates = unique([
+        key.participant,
+        key.participantAlt,
+        msg?.participant,
+        msg?.participantAlt,
+    ])
+    for (const candidate of candidates) learnedBotIdentities.add(candidate)
+    return getBotIdentityCandidates(sock)
+}
+
+function getBotParticipant(metadata, sock, extraCandidates = []) {
+    const identities = getBotIdentityCandidates(sock, extraCandidates)
     return (metadata?.participants || []).find(participant => participantMatches(participant, identities)) || null
 }
 
-function isBotAdmin(metadata, sock) {
-    return isAdminParticipant(getBotParticipant(metadata, sock))
+function isBotAdmin(metadata, sock, extraCandidates = []) {
+    return isAdminParticipant(getBotParticipant(metadata, sock, extraCandidates))
 }
 
 function getSenderParticipant(metadata, senderJid) {
@@ -284,6 +306,7 @@ function buildMenuSections() {
                 { header: "ATURAN", title: "Peraturan Grup", description: "Lihat deskripsi dan aturan grup", id: ".rules" },
                 { header: "ADMIN", title: "Daftar Admin", description: "Lihat seluruh admin grup", id: ".adminlist" },
                 { header: "FITUR", title: "Status Fitur Grup", description: "Cek fitur grup yang sedang aktif", id: ".fiturgrup" },
+                { header: "KOMPATIBEL", title: "Menu Versi Teks", description: "Gunakan jika tombol menu tidak terbuka di HP", id: ".menuteks" },
             ],
         },
         {
@@ -312,17 +335,29 @@ function buildMenuSections() {
 
 function buildFallbackMenuText(bodyText = "") {
     return [
-        bodyText,
+        bodyText || "Akses cepat seluruh fitur grup dalam satu tempat.",
         "",
         "✦ *MENU GRUP • COMMAND CENTER* ✦",
-        "1. `.groupinfo` — informasi grup",
-        "2. `.rules` — peraturan grup",
-        "3. `.adminlist` — daftar admin",
-        "4. `.fiturgrup` — status fitur grup",
-        "5. `.tourl` — reply gambar untuk upload ke URL",
-        "6. `.quiz` — kuis cepat",
-        "7. `.tebakangka` — mulai tebak angka",
-        "8. `.games` — panduan semua game",
+        "",
+        "👥 *INFORMASI GRUP*",
+        "• `.groupinfo` — informasi grup",
+        "• `.rules` — peraturan grup",
+        "• `.adminlist` — daftar admin",
+        "• `.fiturgrup` — status fitur grup",
+        "",
+        "🧰 *MEDIA TOOLS*",
+        "• `.tourl` — reply media menjadi link URL",
+        "• `.stiker` — gambar/video menjadi stiker",
+        "• `.pdf` — gambar menjadi PDF",
+        "",
+        "🎮 *GAME GRUP*",
+        "• `.quiz` — kuis cepat",
+        "• `.tebakangka` — mulai tebak angka",
+        "• `.suit batu` — suit melawan bot",
+        "• `.truth` / `.dare`",
+        "• `.coinflip` / `.roll`",
+        "",
+        "Menu interaktif: `.menu`",
     ].filter(Boolean).join("\n")
 }
 
@@ -365,8 +400,8 @@ async function sendNativeFlowMenu(sock, groupJid, options = {}) {
     }
 
     const title = String(options.title || "✦ MENU GRUP • COMMAND CENTER ✦")
-    const bodyText = String(options.bodyText || "Akses cepat seluruh fitur grup dalam satu tempat.")
-    const footer = String(options.footer || "Pilih kategori dan jalankan command tanpa mengetik manual")
+    const bodyText = String(options.bodyText || "Akses cepat seluruh fitur grup dalam satu tempat. Jika tombol tidak terbuka di HP, ketik .menuteks.")
+    const footer = String(options.footer || "Mobile-first menu • alternatif: .menuteks")
     const mentionedJid = unique(options.mentionedJid)
     const sections = options.sections || buildMenuSections()
     const interactiveMessage = proto.Message.InteractiveMessage.create({
@@ -421,8 +456,8 @@ async function sendLegacyListMenu(sock, groupJid, options = {}) {
     }))
     return sock.sendMessage(groupJid, {
         title: String(options.title || "✦ MENU GRUP • COMMAND CENTER ✦"),
-        text: String(options.bodyText || "Akses cepat seluruh fitur grup dalam satu tempat."),
-        footer: String(options.footer || "Pilih kategori dan jalankan command tanpa mengetik manual"),
+        text: String(options.bodyText || "Akses cepat seluruh fitur grup dalam satu tempat. Jika tombol tidak terbuka di HP, ketik .menuteks."),
+        footer: String(options.footer || "Mobile-first menu • alternatif: .menuteks"),
         buttonText: "BUKA MENU",
         sections,
         mentions: unique(options.mentionedJid),
@@ -431,25 +466,28 @@ async function sendLegacyListMenu(sock, groupJid, options = {}) {
 
 async function sendInteractiveMenu(sock, groupJid, options = {}) {
     if (options.disableInteractive !== true) {
+        // ListMessage diprioritaskan karena lebih kompatibel dengan aplikasi
+        // WhatsApp Android/iOS dibanding Native Flow single_select tertentu.
         try {
-            const generated = await sendNativeFlowMenu(sock, groupJid, options)
-            console.log("[GROUP MENU] Native Flow terkirim", {
-                groupJid,
-                messageId: generated?.key?.id || "-",
-            })
-            return { sent: true, mode: "native-flow", messageId: generated?.key?.id || "" }
+            await sendLegacyListMenu(sock, groupJid, options)
+            console.log("[GROUP MENU] ListMessage terkirim (mobile-first)", { groupJid })
+            return { sent: true, mode: "list-message" }
         } catch (error) {
-            console.log("[GROUP MENU] Native Flow gagal, coba ListMessage", {
+            console.log("[GROUP MENU] ListMessage gagal, coba Native Flow", {
                 groupJid,
                 error: String(error?.message || error).slice(0, 240),
             })
         }
 
         try {
-            await sendLegacyListMenu(sock, groupJid, options)
-            return { sent: true, mode: "list-message" }
+            const generated = await sendNativeFlowMenu(sock, groupJid, options)
+            console.log("[GROUP MENU] Native Flow fallback terkirim", {
+                groupJid,
+                messageId: generated?.key?.id || "-",
+            })
+            return { sent: true, mode: "native-flow", messageId: generated?.key?.id || "" }
         } catch (error) {
-            console.log("[GROUP MENU] ListMessage gagal, pakai fallback teks", {
+            console.log("[GROUP MENU] Native Flow gagal, pakai fallback teks", {
                 groupJid,
                 error: String(error?.message || error).slice(0, 240),
             })
@@ -623,7 +661,7 @@ function formatFeatureStatus(groupJid, groupRemoteControl, botAdmin) {
         `Anti Kasar: ${feature("antiToxic") ? "ON" : "OFF"}`,
         `Sticker Safety: ${feature("stickerSafety") ? "ON" : "OFF"}`,
         `Downloader Command: ${feature("downloader") ? "ON" : "OFF"}`,
-        "Menu Build: V1.2.9",
+        "Menu Build: V1.3.4",
     ].join("\n")
 }
 
@@ -657,12 +695,17 @@ async function handleGroupWelcomeCommand(sock, msg, context = {}) {
     if (compact === ".welcomestatus") text = ".welcome status"
     if (compact === ".welcometest") text = ".welcome test"
     const lower = text.toLowerCase()
-    const commands = [".welcome", ".groupmenu", ".menu", ".help", ".groupinfo", ".rules", ".adminlist", ".fiturgrup", ".tourlinfo", ".stikerinfo", ".pdfinfo", ".games", ".quiz", ".jawab", ".tebakangka", ".tebak", ".coinflip", ".roll", ".truth", ".dare", ".suit"]
+    const commands = [".welcome", ".groupmenu", ".menu", ".help", ".menuteks", ".menutext", ".groupinfo", ".rules", ".adminlist", ".fiturgrup", ".tourlinfo", ".stikerinfo", ".pdfinfo", ".games", ".quiz", ".jawab", ".tebakangka", ".tebak", ".coinflip", ".roll", ".truth", ".dare", ".suit"]
     if (!commands.some(command => lower === command || lower.startsWith(`${command} `))) return false
 
     const groupRemoteControl = context.groupRemoteControl
     const senderJid = normalizeJid(context.senderJid || context.sender || msg?.key?.participant)
     const canControlOwner = Boolean(context.canControlOwner || context.isOwner)
+
+    if (lower === ".menuteks" || lower === ".menutext") {
+        await sock.sendMessage(groupJid, { text: buildFallbackMenuText() })
+        return true
+    }
 
     if (lower === ".menu" || lower === ".groupmenu" || lower === ".help") {
         if (groupRemoteControl?.isGroupFeatureEnabled && !groupRemoteControl.isGroupFeatureEnabled(groupJid, "groupMenu")) {
@@ -671,8 +714,8 @@ async function handleGroupWelcomeCommand(sock, msg, context = {}) {
         }
         const menuResult = await sendInteractiveMenu(sock, groupJid, {
             title: "✦ MENU GRUP • COMMAND CENTER ✦",
-            bodyText: "Akses cepat seluruh fitur grup dalam satu tempat.",
-            footer: "Pilih kategori lalu jalankan command yang kamu butuhkan",
+            bodyText: "Akses cepat seluruh fitur grup dalam satu tempat. Jika tombol tidak terbuka di HP, ketik .menuteks.",
+            footer: "Mobile-first menu • alternatif: .menuteks",
         })
         console.log("[GROUP MENU] Command selesai", {
             groupJid,
@@ -1034,6 +1077,7 @@ module.exports = {
     formatFeatureStatus,
     getBotIdentityCandidates,
     getBotParticipant,
+    rememberBotIdentityCandidates,
     getGroupConfig,
     handleGroupWelcomeCommand,
     handleParticipantUpdate,

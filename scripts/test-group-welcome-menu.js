@@ -51,6 +51,7 @@ async function run() {
     assert.ok(menuRows.some(row => row.id === ".quiz"))
     assert.ok(menuRows.some(row => row.id === ".tebakangka"))
     assert.ok(menuRows.some(row => row.id === ".suit"))
+    assert.ok(menuRows.some(row => row.id === ".menuteks"))
     assert.ok(!menuRows.some(row => row.id === ".help" || /help menu/i.test(row.title || "")))
 
     assert.strictEqual(groupRemoteControl.canonicalFeatureName("welcome"), "welcome")
@@ -99,6 +100,22 @@ async function run() {
             { id: newMember, admin: null },
         ],
     }
+    const lidOnlyBot = "43804539273401@lid"
+    const metadataLidAdmin = {
+        id: groupJid,
+        subject: "Grup LID",
+        participants: [
+            { id: lidOnlyBot, admin: "admin" },
+            { id: newMember, admin: null },
+        ],
+    }
+    const lidSock = { user: { id: botJid } }
+    assert.strictEqual(groupWelcome.isBotAdmin(metadataLidAdmin, lidSock), false)
+    groupWelcome.rememberBotIdentityCandidates(lidSock, {
+        key: { remoteJid: groupJid, participant: lidOnlyBot, fromMe: true },
+    })
+    assert.strictEqual(groupWelcome.isBotAdmin(metadataLidAdmin, lidSock), true)
+
     const sentAdmin = []
     const sockAdmin = {
         user: { id: botJid },
@@ -143,6 +160,30 @@ async function run() {
         },
     }
 
+    const mobileMenuMessages = []
+    let nativeRelayCalled = false
+    const mobileMenuSock = {
+        user: { id: botJid },
+        sendMessage: async (_jid, content) => {
+            mobileMenuMessages.push(content)
+            return { key: { id: "LIST-MENU" } }
+        },
+        relayMessage: async () => {
+            nativeRelayCalled = true
+        },
+    }
+    const mobileMenuResult = await groupWelcome.sendInteractiveMenu(mobileMenuSock, groupJid)
+    assert.strictEqual(mobileMenuResult.mode, "list-message")
+    assert.strictEqual(nativeRelayCalled, false)
+    assert.strictEqual(mobileMenuMessages[0].buttonText, "BUKA MENU")
+
+    assert.strictEqual(await groupWelcome.handleGroupWelcomeCommand(commandSock, { key: { remoteJid: groupJid, participant: newMember } }, {
+        ...commandContext,
+        text: ".menuteks",
+    }), true)
+    assert.ok(commandMessages.at(-1).text.includes("MENU GRUP • COMMAND CENTER"))
+    assert.ok(commandMessages.at(-1).text.includes(".tourl"))
+
     assert.strictEqual(await groupWelcome.handleGroupWelcomeCommand(commandSock, { key: { remoteJid: groupJid, participant: newMember } }, {
         ...commandContext,
         text: ".quiz",
@@ -167,7 +208,7 @@ async function run() {
     assert.ok(!groupWelcomeSource.includes("☰ BUKA MENU"))
     assert.ok(groupWelcomeSource.includes('title: "🎉 WELCOME TO THE GROUP"'))
     assert.ok(!groupWelcome.DEFAULT_TEMPLATE.startsWith("🎉"))
-    assert.ok(groupWelcomeSource.includes("Menu Build: V1.2.9"))
+    assert.ok(groupWelcomeSource.includes("Menu Build: V1.3.4"))
 
     const indexSource = fs.readFileSync(path.join(__dirname, "..", "index.js"), "utf8")
     assert.ok(indexSource.includes("groupWelcome.installGroupWelcome"))
@@ -175,8 +216,9 @@ async function run() {
     assert.ok(indexSource.includes("groupWelcome.handleGroupWelcomeCommand"))
     assert.ok(indexSource.includes('handler: "groupAdminGate"'))
     assert.ok(indexSource.includes('reason: "bot-not-admin"'))
-    assert.ok(indexSource.includes("groupWelcome.isBotAdmin(inboundGroupMetadata, sock)"))
-    const gateIndex = indexSource.indexOf("groupWelcome.isBotAdmin(inboundGroupMetadata, sock)")
+    assert.ok(indexSource.includes("groupWelcome.rememberBotIdentityCandidates(sock, msg)"))
+    assert.ok(indexSource.includes("groupWelcome.isBotAdmin(inboundGroupMetadata, sock, selfIdentityCandidates)"))
+    const gateIndex = indexSource.indexOf("groupWelcome.isBotAdmin(inboundGroupMetadata, sock, selfIdentityCandidates)")
     const stickerSafetyIndex = indexSource.indexOf("stickerSafetyCommandHandled")
     const antiToxicIndex = indexSource.indexOf("shouldRunAntiToxicForMessage")
     assert.ok(gateIndex > 0 && gateIndex < stickerSafetyIndex)
