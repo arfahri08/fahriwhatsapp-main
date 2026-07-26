@@ -11,16 +11,9 @@ const {
 } = require("@whiskeysockets/baileys")
 const messageCleaner = require("./messageCleaner")
 
-const DEFAULT_ACEIMG_ENDPOINTS = [
-    "https://aceimg.com/api/upload",
-    "https://aceimg.com/api/upload/",
-    "https://aceimg.com/api/v1/upload",
-    "https://aceimg.com/api/files",
-    "https://aceimg.com/upload",
-    "https://aceimg.com/upload/",
-]
-const CATBOX_UPLOAD_URL = "https://catbox.moe/user/api.php"
-const UPLOAD_TIMEOUT_MS = Math.max(15000, Number(process.env.IMAGE_TO_URL_TIMEOUT_MS || 120000))
+const HOSTIFY_UPLOAD_URL = "https://upload.hostify.indevs.in/api/upload"
+const UGUU_UPLOAD_URL = "https://uguu.se/upload"
+const UPLOAD_TIMEOUT_MS = Math.max(15000, Number(process.env.IMAGE_TO_URL_TIMEOUT_MS || 60000))
 
 function unwrapMessage(message) {
     let current = message || {}
@@ -128,6 +121,7 @@ function inferExtension(targetMsg) {
     if (mime.includes("jpeg") || mime.includes("jpg")) return "jpg"
     if (mime.includes("webp")) return "webp"
     if (mime.includes("gif")) return "gif"
+    if (mime.includes("avif")) return "avif"
     if (mime.includes("mp4")) return "mp4"
     if (mime.includes("quicktime")) return "mov"
     if (mime.includes("webm")) return "webm"
@@ -156,28 +150,20 @@ function safeFileName(value) {
     return clean || `upload_${Date.now()}.bin`
 }
 
-function normalizeAceImgUrl(value) {
-    const raw = String(value || "").trim().replace(/^['\"]|['\"]$/g, "")
-    if (!raw) return ""
-
-    const direct = raw.match(/https?:\/\/(?:cdn2?\.)aceimg\.com\/[A-Za-z0-9._%~-]+/i)
-    if (direct) return direct[0].replace(/^http:/i, "https:")
-
-    const viewer = raw.match(/https?:\/\/(?:www\.)?aceimg\.com\/upload\/?\?f=([A-Za-z0-9._%~-]+)/i)
-    if (viewer) return `https://cdn.aceimg.com/${viewer[1]}`
-
-    const relativeViewer = raw.match(/(?:^|\s|['\"])(?:\/upload\/?)?\?f=([A-Za-z0-9._%~-]+)/i)
-    if (relativeViewer) return `https://cdn.aceimg.com/${relativeViewer[1]}`
-
-    if (/^[A-Za-z0-9_-]{5,}\.(?:jpe?g|png|webp|gif|avif|mp4|mov|webm)$/i.test(raw)) {
-        return `https://cdn.aceimg.com/${raw}`
+function normalizeHttpUrl(value) {
+    const raw = String(value || "").trim().replace(/^['"]|['"]$/g, "")
+    if (!/^https?:\/\//i.test(raw)) return ""
+    try {
+        const parsed = new URL(raw)
+        if (!parsed.hostname || !parsed.pathname) return ""
+        return parsed.toString()
+    } catch {
+        return ""
     }
-
-    return ""
 }
 
 function collectResponseCandidates(value, output = [], depth = 0) {
-    if (depth > 7 || value == null) return output
+    if (depth > 8 || value == null) return output
     if (typeof value === "string" || typeof value === "number") {
         output.push(String(value))
         return output
@@ -188,8 +174,8 @@ function collectResponseCandidates(value, output = [], depth = 0) {
     }
     if (typeof value === "object") {
         const preferredKeys = [
-            "cdn_url", "cdnUrl", "direct_url", "directUrl", "secure_url", "secureUrl",
-            "url", "link", "location", "file", "filename", "fileName", "name", "key", "path",
+            "direct_url", "directUrl", "secure_url", "secureUrl", "download_url", "downloadUrl",
+            "file_url", "fileUrl", "url", "link", "location", "src", "path",
         ]
         for (const key of preferredKeys) {
             if (Object.prototype.hasOwnProperty.call(value, key)) {
@@ -203,32 +189,19 @@ function collectResponseCandidates(value, output = [], depth = 0) {
     return output
 }
 
-function extractAceImgUrl(data, headers = {}) {
-    const headerCandidates = [headers.location, headers.Location]
-    for (const candidate of headerCandidates) {
-        const normalized = normalizeAceImgUrl(candidate)
-        if (normalized) return normalized
-    }
-
-    const candidates = collectResponseCandidates(data)
+function extractFirstHttpUrl(data, headers = {}) {
+    const candidates = [headers.location, headers.Location, ...collectResponseCandidates(data)]
     for (const candidate of candidates) {
-        const normalized = normalizeAceImgUrl(candidate)
-        if (normalized) return normalized
+        const direct = normalizeHttpUrl(candidate)
+        if (direct) return direct
+
+        const embedded = String(candidate || "").match(/https?:\/\/[^\s"'<>\\]+/i)
+        if (embedded) {
+            const normalized = normalizeHttpUrl(embedded[0])
+            if (normalized) return normalized
+        }
     }
-
-    const text = typeof data === "string" ? data : JSON.stringify(data || {})
-    const direct = normalizeAceImgUrl(text)
-    if (direct) return direct
-
-    const labelledFile = text.match(/(?:filename|file_name|fileName|file|name|key|path)["'\s:=]+([A-Za-z0-9_-]{5,}\.(?:jpe?g|png|webp|gif|avif|mp4|mov|webm))/i)
-    if (labelledFile) return `https://cdn.aceimg.com/${labelledFile[1]}`
-
     return ""
-}
-
-function buildAceImgEndpoints() {
-    const custom = String(process.env.ACEIMG_UPLOAD_URL || "").trim()
-    return [...new Set([custom, ...DEFAULT_ACEIMG_ENDPOINTS].filter(Boolean))]
 }
 
 function makeUploadForm(fieldName, buffer, fileName, mimeType) {
@@ -243,19 +216,16 @@ function makeUploadForm(fieldName, buffer, fileName, mimeType) {
 
 function responsePreview(data) {
     const text = typeof data === "string" ? data : JSON.stringify(data || {})
-    return text.replace(/\s+/g, " ").trim().slice(0, 180)
+    return text.replace(/\s+/g, " ").trim().slice(0, 220)
 }
 
-async function postAceImgAttempt(endpoint, fieldName, buffer, fileName, mimeType) {
+async function postMultipart(endpoint, fieldName, buffer, fileName, mimeType) {
     const form = makeUploadForm(fieldName, buffer, fileName, mimeType)
     return axios.post(endpoint, form, {
         headers: {
             ...form.getHeaders(),
             Accept: "application/json, text/plain, */*",
-            Origin: "https://aceimg.com",
-            Referer: "https://aceimg.com/",
             "User-Agent": "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/131 Mobile Safari/537.36",
-            "X-Requested-With": "XMLHttpRequest",
         },
         timeout: UPLOAD_TIMEOUT_MS,
         maxBodyLength: Infinity,
@@ -264,86 +234,46 @@ async function postAceImgAttempt(endpoint, fieldName, buffer, fileName, mimeType
     })
 }
 
-async function uploadToAceImg(buffer, fileName, mimeType) {
-    const attempts = []
-    const endpoints = buildAceImgEndpoints()
-    const fieldNames = ["file", "files[]", "fileToUpload"]
+async function uploadToHostify(buffer, fileName, mimeType) {
+    const response = await postMultipart(HOSTIFY_UPLOAD_URL, "file", buffer, fileName, mimeType)
+    const url = extractFirstHttpUrl(response.data, response.headers)
+    if (response.status >= 200 && response.status < 300 && url) return url
 
-    for (const endpoint of endpoints) {
-        for (const fieldName of fieldNames) {
-            try {
-                const response = await postAceImgAttempt(endpoint, fieldName, buffer, fileName, mimeType)
-                const url = extractAceImgUrl(response.data, response.headers)
-                if (url) return url
-
-                const preview = responsePreview(response.data)
-                attempts.push(`${response.status} ${endpoint} [${fieldName}] ${preview || "tanpa URL"}`)
-
-                if ([401, 403, 404, 405, 413, 415].includes(response.status)) break
-            } catch (error) {
-                const code = error?.code || error?.cause?.code || "NETWORK"
-                attempts.push(`${code} ${endpoint} [${fieldName}] ${String(error?.message || error).slice(0, 120)}`)
-                break
-            }
-        }
-    }
-
-    const error = new Error(`AceImg gagal: ${attempts.slice(0, 6).join(" | ") || "tidak ada respons"}`)
-    error.attempts = attempts
-    throw error
+    throw new Error(`Hostify HTTP ${response.status}: ${responsePreview(response.data) || "tanpa URL"}`)
 }
 
-async function uploadToCatbox(buffer, fileName, mimeType) {
-    const form = new FormData()
-    form.append("reqtype", "fileupload")
-    form.append("fileToUpload", buffer, {
-        filename: safeFileName(fileName),
-        contentType: mimeType || "application/octet-stream",
-        knownLength: buffer.length,
-    })
+async function uploadToUguu(buffer, fileName, mimeType) {
+    const response = await postMultipart(UGUU_UPLOAD_URL, "files[]", buffer, fileName, mimeType)
+    const url = extractFirstHttpUrl(response.data, response.headers)
+    if (response.status >= 200 && response.status < 300 && url) return url
 
-    const response = await axios.post(CATBOX_UPLOAD_URL, form, {
-        headers: {
-            ...form.getHeaders(),
-            Accept: "text/plain, */*",
-            "User-Agent": "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/131 Mobile Safari/537.36",
-        },
-        timeout: UPLOAD_TIMEOUT_MS,
-        maxBodyLength: Infinity,
-        maxContentLength: Infinity,
-        validateStatus: () => true,
-        responseType: "text",
-    })
+    throw new Error(`Uguu HTTP ${response.status}: ${responsePreview(response.data) || "tanpa URL"}`)
+}
 
-    const url = String(response.data || "").trim()
-    if (response.status < 200 || response.status >= 300) {
-        throw new Error(`Catbox HTTP ${response.status}: ${url.slice(0, 160)}`)
-    }
-    if (!/^https?:\/\//i.test(url)) {
-        throw new Error(`Respons Catbox tidak valid: ${url.slice(0, 160)}`)
-    }
-    return url
+function getProviderOrder() {
+    const preferred = String(process.env.IMAGE_TO_URL_PROVIDER || "hostify").trim().toLowerCase()
+    if (preferred === "uguu") return ["uguu", "hostify"]
+    return ["hostify", "uguu"]
 }
 
 async function uploadMedia(buffer, fileName, mimeType) {
-    let aceImgError = null
-    try {
-        const url = await uploadToAceImg(buffer, fileName, mimeType)
-        return { url, provider: "AceImg" }
-    } catch (error) {
-        aceImgError = error
-        console.log(`[IMAGE TO URL] AceImg gagal, mencoba fallback: ${error.message}`)
+    const errors = []
+    for (const provider of getProviderOrder()) {
+        try {
+            if (provider === "hostify") {
+                return { url: await uploadToHostify(buffer, fileName, mimeType), provider: "Hostify" }
+            }
+            if (provider === "uguu") {
+                return { url: await uploadToUguu(buffer, fileName, mimeType), provider: "Uguu" }
+            }
+        } catch (error) {
+            const message = String(error?.message || error)
+            errors.push(message)
+            console.log(`[IMAGE TO URL] ${provider} gagal: ${message}`)
+        }
     }
 
-    try {
-        const url = await uploadToCatbox(buffer, fileName, mimeType)
-        return { url, provider: "Catbox" }
-    } catch (catboxError) {
-        throw new Error([
-            String(aceImgError?.message || "AceImg gagal"),
-            `Catbox gagal: ${String(catboxError?.message || catboxError)}`,
-        ].join(" | "))
-    }
+    throw new Error(errors.join(" | ") || "semua provider upload gagal")
 }
 
 async function downloadTargetBuffer(sock, targetMsg) {
@@ -518,12 +448,12 @@ async function handleImageToUrl(sock, msg, context = {}) {
 }
 
 module.exports = {
-    buildAceImgEndpoints,
     collectResponseCandidates,
-    extractAceImgUrl,
+    extractFirstHttpUrl,
+    getProviderOrder,
     handleImageToUrl,
-    normalizeAceImgUrl,
+    normalizeHttpUrl,
     uploadMedia,
-    uploadToAceImg,
-    uploadToCatbox,
+    uploadToHostify,
+    uploadToUguu,
 }
