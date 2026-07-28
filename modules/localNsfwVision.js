@@ -38,13 +38,23 @@ const NUDENET_LABELS = [
 ];
 
 const EXPLICIT_CLASS_THRESHOLDS = Object.freeze({
-    FEMALE_GENITALIA_EXPOSED: 0.16,
-    MALE_GENITALIA_EXPOSED: 0.16,
-    ANUS_EXPOSED: 0.16,
-    FEMALE_BREAST_EXPOSED: 0.18,
-    BUTTOCKS_EXPOSED: 0.22,
-    MALE_BREAST_EXPOSED: 0.42,
+    // Kandidat lemah dari bulu/pola hewan sebelumnya dapat salah dibaca sebagai
+    // bagian tubuh. Ambang dinaikkan, lalu kandidat ambigu dikonfirmasi ViT.
+    FEMALE_GENITALIA_EXPOSED: 0.34,
+    MALE_GENITALIA_EXPOSED: 0.34,
+    ANUS_EXPOSED: 0.36,
+    FEMALE_BREAST_EXPOSED: 0.42,
+    BUTTOCKS_EXPOSED: 0.46,
+    MALE_BREAST_EXPOSED: 0.62,
 });
+
+const NUDENET_ALWAYS_STRONG_CLASSES = new Set([
+    "FEMALE_GENITALIA_EXPOSED",
+    "MALE_GENITALIA_EXPOSED",
+    "ANUS_EXPOSED",
+]);
+const NUDENET_STRONG_SINGLE_FRAME = 0.74;
+const NUDENET_VIT_CONFIRM_THRESHOLD = 0.56;
 
 let ortRuntime = null;
 let ortLoadError = null;
@@ -99,9 +109,9 @@ function getConfig() {
         vitMaxFrames: Math.max(1, Math.min(4, Math.floor(parseNumber(process.env.STICKER_VIT_MAX_FRAMES, 3)))),
         nudeNetCandidateThreshold: clamp(parseNumber(process.env.STICKER_NUDENET_CANDIDATE_THRESHOLD, 0.12), 0.05, 0.95),
         nudeNetNmsThreshold: clamp(parseNumber(process.env.STICKER_NUDENET_NMS_THRESHOLD, 0.45), 0.05, 0.95),
-        vitHardThreshold: clamp(parseNumber(process.env.STICKER_VIT_HARD_THRESHOLD, 0.72), 0.05, 0.99),
-        vitFrameThreshold: clamp(parseNumber(process.env.STICKER_VIT_FRAME_THRESHOLD, 0.56), 0.05, 0.99),
-        vitConsensusThreshold: clamp(parseNumber(process.env.STICKER_VIT_CONSENSUS_THRESHOLD, 0.50), 0.05, 0.99),
+        vitHardThreshold: clamp(parseNumber(process.env.STICKER_VIT_HARD_THRESHOLD, 0.86), 0.05, 0.99),
+        vitFrameThreshold: clamp(parseNumber(process.env.STICKER_VIT_FRAME_THRESHOLD, 0.64), 0.05, 0.99),
+        vitConsensusThreshold: clamp(parseNumber(process.env.STICKER_VIT_CONSENSUS_THRESHOLD, 0.56), 0.05, 0.99),
         wasmThreads: Math.max(1, Math.min(2, Math.floor(parseNumber(process.env.STICKER_ONNX_WASM_THREADS, 1)))),
         debug: parseBool(process.env.STICKER_LOCAL_VISION_DEBUG, false),
     };
@@ -401,6 +411,11 @@ function evaluateNudeNetDetections(detections = []) {
         const strongest = explicit[0];
         const genital = /GENITALIA|ANUS/.test(strongest.class);
         const category = genital ? "porn" : "nudity";
+        const frameHits = new Set(
+            explicit
+                .filter(item => item.class === strongest.class)
+                .map(item => Number(item.frameIndex || 0))
+        ).size;
         return {
             violation: true,
             category,
@@ -408,6 +423,7 @@ function evaluateNudeNetDetections(detections = []) {
             reason: `nudenet:${strongest.class.toLowerCase()}`,
             strongest,
             explicit,
+            frameHits,
         };
     }
 
@@ -574,30 +590,54 @@ async function inspectFrames(frames = [], options = {}) {
     result.nudeNet = await inspectNudeNetFrames(frames, options);
     result.available = result.available || result.nudeNet.available;
     if (result.nudeNet.error) result.errors.push(result.nudeNet.error);
-    if (result.nudeNet.violation) {
+
+    const nudeClass = String(result.nudeNet?.strongest?.class || "");
+    const nudeConfidence = Number(result.nudeNet?.confidence || 0);
+    const nudeFrameHits = Number(result.nudeNet?.frameHits || 0);
+    const nudeNetImmediatelyStrong = result.nudeNet?.violation && (
+        NUDENET_ALWAYS_STRONG_CLASSES.has(nudeClass)
+        || nudeConfidence >= NUDENET_STRONG_SINGLE_FRAME
+        || nudeFrameHits >= 2
+    );
+
+    if (nudeNetImmediatelyStrong) {
         Object.assign(result, {
             violation: true,
             category: result.nudeNet.category,
-            confidence: result.nudeNet.confidence,
+            confidence: nudeConfidence,
             reason: result.nudeNet.reason,
         });
     } else {
+        // Kandidat satu-frame yang tidak kuat harus mendapat konfirmasi ViT.
+        // Ini menahan false positive hewan/kucing tanpa mematikan deteksi eksplisit.
         result.vit = await inspectVitFrames(frames, options);
         result.available = result.available || result.vit.available;
         if (result.vit.error) result.errors.push(result.vit.error);
-        if (result.vit.violation) {
+
+        const vitConfidence = Number(result.vit?.confidence || 0);
+        const ambiguousNudeNetConfirmed = result.nudeNet?.violation
+            && result.vit?.available
+            && (result.vit.violation || vitConfidence >= NUDENET_VIT_CONFIRM_THRESHOLD);
+
+        if (ambiguousNudeNetConfirmed) {
+            Object.assign(result, {
+                violation: true,
+                category: result.nudeNet.category || result.vit.category || "nudity",
+                confidence: Math.max(nudeConfidence, vitConfidence),
+                reason: `${result.nudeNet.reason}+vit-confirmed`,
+            });
+        } else if (!result.nudeNet?.violation && result.vit?.violation) {
             Object.assign(result, {
                 violation: true,
                 category: result.vit.category,
-                confidence: result.vit.confidence,
+                confidence: vitConfidence,
                 reason: result.vit.reason,
             });
         } else {
-            result.confidence = Math.max(
-                Number(result.nudeNet?.confidence || 0),
-                Number(result.vit?.confidence || 0)
-            );
-            result.reason = result.available ? "local-vision-clean" : "local-vision-unavailable";
+            result.confidence = Math.max(nudeConfidence, vitConfidence);
+            result.reason = result.nudeNet?.violation
+                ? (result.vit?.available ? "nudenet-ambiguous-vetoed-by-vit" : "nudenet-ambiguous-unconfirmed")
+                : result.available ? "local-vision-clean" : "local-vision-unavailable";
         }
     }
 
@@ -689,6 +729,9 @@ async function dispose() {
 module.exports = {
     NUDENET_LABELS,
     EXPLICIT_CLASS_THRESHOLDS,
+    NUDENET_ALWAYS_STRONG_CLASSES,
+    NUDENET_STRONG_SINGLE_FRAME,
+    NUDENET_VIT_CONFIRM_THRESHOLD,
     NUDENET_MODEL_PATH,
     VIT_MODEL_PATH,
     preprocessNudeNetPng,

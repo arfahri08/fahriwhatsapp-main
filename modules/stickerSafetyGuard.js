@@ -50,7 +50,7 @@ const recentMessageIds = new Map();
 const recentStickerHashes = new Map();
 const MESSAGE_DEDUPE_TTL_MS = 2 * 60 * 1000;
 const HASH_DEDUPE_TTL_MS = 30 * 1000;
-const NSFW_PIPELINE_VERSION = "sticker-nsfw-v6-fast-background";
+const NSFW_PIPELINE_VERSION = "sticker-nsfw-v7-false-positive-guard";
 
 let stateCache = null;
 let wordCache = null;

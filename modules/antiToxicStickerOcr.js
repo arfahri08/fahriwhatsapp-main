@@ -6,7 +6,7 @@ const os = require("os")
 const path = require("path")
 const { execFile, spawnSync } = require("child_process")
 
-const PIPELINE_VERSION = "anti-toxic-sticker-ocr-v5.2-text-region"
+const PIPELINE_VERSION = "anti-toxic-sticker-ocr-v5.3-balanced-psm"
 const resultCache = new Map()
 const inFlightScans = new Map()
 const scanQueue = []
@@ -59,9 +59,9 @@ function getRuntimeConfig() {
             ? parseBool(process.env.ANTI_TOXIC_STICKER_OCR_DEBUG, false)
             : debugOverride,
         maxBytes: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MAX_BYTES, 3 * 1024 * 1024, 1024),
-        maxCandidates: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MAX_CANDIDATES, 10, 4, 16),
-        maxFrames: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MAX_FRAMES, 3, 1, 5),
-        timeoutMs: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_TIMEOUT_MS, 12000, 5000, 45000),
+        maxCandidates: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MAX_CANDIDATES, 14, 4, 20),
+        maxFrames: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MAX_FRAMES, 4, 1, 6),
+        timeoutMs: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_TIMEOUT_MS, 18000, 5000, 45000),
         cacheLimit: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_CACHE_LIMIT, 300, 1, 2000),
         cacheTtlMs: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_CACHE_TTL_MS, 4 * 60 * 60 * 1000, 1000),
         errorCacheTtlMs: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_ERROR_CACHE_TTL_MS, 10 * 60 * 1000, 1000),
@@ -75,7 +75,7 @@ function getRuntimeConfig() {
         animatedFfmpegFallback: parseBool(process.env.ANTI_TOXIC_STICKER_OCR_ANIMATED_FFMPEG_FALLBACK, false),
         mediumConfidence: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MEDIUM_CONFIDENCE, 25, 1, 100),
         exactShortConfidence: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_EXACT_SHORT_CONFIDENCE, 10, 0, 100),
-        maxPasses: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MAX_PASSES, 12, 4, 20),
+        maxPasses: parsePositiveInt(process.env.ANTI_TOXIC_STICKER_OCR_MAX_PASSES, 16, 4, 24),
         pngjsEnabled: parseBool(process.env.ANTI_TOXIC_STICKER_OCR_PNGJS, true),
         cliEnabled: parseBool(process.env.ANTI_TOXIC_STICKER_OCR_CLI_FALLBACK, true),
         tesseractBin: String(process.env.TESSERACT_BIN || "tesseract").trim() || "tesseract",
@@ -1115,9 +1115,8 @@ async function recognizeCandidateWithCli(candidate, options = {}) {
 function getRecognitionPlan(candidates, psmModes, maxPasses) {
     const plan = []
     const limit = Math.max(1, Number(maxPasses || 1))
-    const primary = psmModes[0] || "7"
-    const secondary = psmModes[1] || "8"
-    const sparse = psmModes[2] || "11"
+    const modes = [...new Set((psmModes || []).map(value => String(value || "")).filter(Boolean))]
+    if (!modes.length) modes.push("8", "7", "11", "12")
     const firstByFrame = []
     const seenFrames = new Set()
 
@@ -1134,12 +1133,14 @@ function getRecognitionPlan(candidates, psmModes, maxPasses) {
         if (!duplicate) plan.push({ candidate, psm })
     }
 
-    // Every sampled frame gets line + word segmentation before extra variants.
-    for (const candidate of firstByFrame) append(candidate, primary)
-    for (const candidate of firstByFrame) append(candidate, secondary)
-    for (const candidate of candidates || []) append(candidate, primary)
-    for (const candidate of candidates || []) append(candidate, secondary)
-    for (const candidate of firstByFrame) append(candidate, sparse)
+    // Coba seluruh mode pada kandidat pertama setiap frame lebih dulu. Dengan
+    // begitu frame/animasi yang buruk tidak menghabiskan seluruh budget OCR.
+    for (const mode of modes) {
+        for (const candidate of firstByFrame) append(candidate, mode)
+    }
+    for (const mode of modes) {
+        for (const candidate of candidates || []) append(candidate, mode)
+    }
     return plan.slice(0, limit)
 }
 
@@ -1276,11 +1277,12 @@ function getPsmModes(options = {}) {
     if (Array.isArray(options.psmModes) && options.psmModes.length) return options.psmModes
     const tesseract = getTesseract()
     return [
-        // Sparse modes work better for a short word inside a small sticker label.
+        // Mayoritas sticker berisi satu kata/kalimat pendek. Mulai dari mode
+        // word/line, baru gunakan sparse text sebagai fallback.
+        tesseract?.PSM?.SINGLE_WORD || "8",
+        tesseract?.PSM?.SINGLE_LINE || "7",
         tesseract?.PSM?.SPARSE_TEXT || "11",
         tesseract?.PSM?.SPARSE_TEXT_OSD || "12",
-        tesseract?.PSM?.SINGLE_LINE || "7",
-        tesseract?.PSM?.SINGLE_WORD || "8",
     ]
 }
 
@@ -1848,6 +1850,8 @@ module.exports = {
     extractAnimatedStickerFrames,
     recognizeCandidate,
     normalizeOcrCandidates,
+    getRecognitionPlan,
+    getPsmModes,
     matchOcrCandidatesAgainstWordlist,
     getAntiToxicStickerOcrHealth,
     clearAntiToxicStickerOcrCache,

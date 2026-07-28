@@ -3172,7 +3172,11 @@ async function startBot() {
             const pipelineText = getAntiToxicPipelineText(item)
             const isMe = Boolean(item?.key?.fromMe)
             const isAntiToxicOwnerCommand = isAntiToxicOwnerCommandText(pipelineText)
-            const allowFromMeTextModeration = isMe && isAntiToxicWarnOwnerEnabled()
+            const itemIsGroup = isGroupJid(item?.key?.remoteJid)
+            // Pesan yang benar-benar diketik dari akun userbot di grup memiliki
+            // fromMe=true. Tetap moderasi pesan itu; pesan keluaran bot disaring
+            // lebih dulu oleh isBotGeneratedMessage().
+            const allowFromMeTextModeration = isMe && (itemIsGroup || isAntiToxicWarnOwnerEnabled())
             const shouldSkipBotGenerated = isMe
                 && !isAntiToxicOwnerCommand
                 && (
@@ -3247,7 +3251,11 @@ async function startBot() {
             const pipelineText = getAntiToxicPipelineText(item)
             const isMe = Boolean(item?.key?.fromMe)
             const isAntiToxicOwnerCommand = isAntiToxicOwnerCommandText(pipelineText)
-            const allowFromMeTextModeration = isMe && isAntiToxicWarnOwnerEnabled()
+            const itemIsGroup = isGroupJid(item?.key?.remoteJid)
+            // Pesan yang benar-benar diketik dari akun userbot di grup memiliki
+            // fromMe=true. Tetap moderasi pesan itu; pesan keluaran bot disaring
+            // lebih dulu oleh isBotGeneratedMessage().
+            const allowFromMeTextModeration = isMe && (itemIsGroup || isAntiToxicWarnOwnerEnabled())
             if (isMe && !isAntiToxicOwnerCommand && !allowFromMeTextModeration) continue
 
             const itemFrom = item?.key?.remoteJid || ""
@@ -3626,7 +3634,9 @@ async function startBot() {
                 || process.env.ANTI_TOXIC_TEST_STICKER_FROM_ME
                 || "true"
             ).trim())
-        const allowFromMeTextModeration = isMe && isAntiToxicWarnOwnerEnabled()
+        // Pesan manual dari akun userbot di grup ikut Anti Kasar. Pesan bot
+        // sendiri tetap dilewati melalui isBotGeneratedMessage(msg).
+        const allowFromMeTextModeration = isMe && (isGroup || isAntiToxicWarnOwnerEnabled())
         const skipAntiToxicBecauseBotGenerated = isMe && isBotGeneratedMessage(msg)
         const skipAntiToxicBecauseFromMeNonCommand = isMe
             && !isAntiToxicOwnerCommand

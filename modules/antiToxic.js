@@ -33,7 +33,7 @@ const TRANSLATE_TARGETS = String(process.env.ANTI_TOXIC_TRANSLATE_TARGETS || "id
     .filter(Boolean)
     .slice(0, 3);
 const ANTI_TOXIC_STICKER_OCR_ENABLED = !/^(0|false|off|no)$/i.test(String(process.env.ANTI_TOXIC_STICKER_OCR || "true").trim());
-const ANTI_TOXIC_STICKER_OCR_TIMEOUT_MS = Number(process.env.ANTI_TOXIC_STICKER_OCR_TIMEOUT_MS || 15000);
+const ANTI_TOXIC_STICKER_OCR_TIMEOUT_MS = Number(process.env.ANTI_TOXIC_STICKER_OCR_TIMEOUT_MS || 18000);
 const ANTI_TOXIC_STICKER_OCR_LANGS = String(process.env.ANTI_TOXIC_STICKER_OCR_LANGS || process.env.ANTI_TOXIC_STICKER_OCR_LANG || "eng+ind,eng")
     .split(",")
     .map(item => item.trim())
@@ -41,11 +41,17 @@ const ANTI_TOXIC_STICKER_OCR_LANGS = String(process.env.ANTI_TOXIC_STICKER_OCR_L
 const ANTI_TOXIC_STICKER_OCR_LANG = ANTI_TOXIC_STICKER_OCR_LANGS[0] || "eng+ind";
 const ANTI_TOXIC_STICKER_OCR_MAX_BYTES = parseByteLimit(process.env.ANTI_TOXIC_STICKER_OCR_MAX_BYTES, 3 * 1024 * 1024);
 const ANTI_TOXIC_STICKER_OCR_CACHE_LIMIT = Number(process.env.ANTI_TOXIC_STICKER_OCR_CACHE_LIMIT || 300);
-const ANTI_TOXIC_STICKER_OCR_MAX_FRAMES = Math.max(1, Number(process.env.ANTI_TOXIC_STICKER_OCR_MAX_FRAMES || 3));
-const ANTI_TOXIC_STICKER_OCR_MAX_CANDIDATES = Math.max(1, Number(process.env.ANTI_TOXIC_STICKER_OCR_MAX_CANDIDATES || 6));
+const ANTI_TOXIC_STICKER_OCR_MAX_FRAMES = Math.max(1, Number(process.env.ANTI_TOXIC_STICKER_OCR_MAX_FRAMES || 4));
+const ANTI_TOXIC_STICKER_OCR_MAX_CANDIDATES = Math.max(1, Number(process.env.ANTI_TOXIC_STICKER_OCR_MAX_CANDIDATES || 14));
 const ANTI_TOXIC_STICKER_OCR_DEBUG = /^(1|true|yes|on)$/i.test(String(process.env.ANTI_TOXIC_STICKER_OCR_DEBUG || "false").trim());
 const ANTI_TOXIC_WARN_OWNER_MESSAGES = /^(1|true|yes|on)$/i.test(
     String(process.env.ANTI_TOXIC_WARN_OWNER_MESSAGES || process.env.ANTI_TOXIC_TEST_OWNER || "false").trim()
+);
+// Userbot menggunakan akun WhatsApp pemilik sebagai socket, sehingga pesan
+// manual pemilik di grup memiliki fromMe=true. Default: tetap beri warning di
+// grup, tetapi private chat pemilik tetap dikecualikan.
+const ANTI_TOXIC_WARN_OWNER_GROUP_MESSAGES = !/^(0|false|off|no)$/i.test(
+    String(process.env.ANTI_TOXIC_WARN_OWNER_GROUP_MESSAGES || "true").trim()
 );
 const ANTI_TOXIC_STICKER_WARN_FROM_ME = /^(1|true|yes|on)$/i.test(
     String(process.env.ANTI_TOXIC_STICKER_WARN_FROM_ME || process.env.ANTI_TOXIC_TEST_STICKER_FROM_ME || "true").trim()
@@ -688,6 +694,11 @@ function withTimeout(promise, timeoutMs, label) {
 
 function isGroupJid(jid) {
     return String(jid || "").trim().toLowerCase().endsWith("@g.us");
+}
+
+function shouldWarnOwnerMessage(msg) {
+    if (ANTI_TOXIC_WARN_OWNER_MESSAGES) return true;
+    return Boolean(ANTI_TOXIC_WARN_OWNER_GROUP_MESSAGES && isGroupJid(msg?.key?.remoteJid));
 }
 
 function isBroadcastJid(jid) {
@@ -4141,7 +4152,8 @@ async function handleAntiToxicStatusCommand(msg, sock, ownerJid, text) {
             "ANTI-TOXIC STATUS",
             `Word count: ${words.length}`,
             `Owner JID: ${ownerJid || "-"}`,
-            `Warn owner: ${ANTI_TOXIC_WARN_OWNER_MESSAGES ? "true" : "false"}`,
+            `Warn owner private: ${ANTI_TOXIC_WARN_OWNER_MESSAGES ? "true" : "false"}`,
+            `Warn owner/userbot di grup: ${ANTI_TOXIC_WARN_OWNER_GROUP_MESSAGES ? "true" : "false"}`,
             `Cooldown ms: ${ANTI_TOXIC_WARN_COOLDOWN_MS}`,
             `Send timeout: ${SEND_TIMEOUT_MS}`,
             `Send retry attempts: ${SEND_RETRY_ATTEMPTS}`,
@@ -4420,7 +4432,7 @@ async function handleToxicCheckInner(msg, sock, ownerJid, options = {}) {
 
     if (
         msg?.key?.fromMe
-        && !ANTI_TOXIC_WARN_OWNER_MESSAGES
+        && !shouldWarnOwnerMessage(msg)
         && !isAntiToxicOwnerCommandText(rawText)
         && !(isStickerMessage(msg) && ANTI_TOXIC_STICKER_WARN_FROM_ME)
     ) {
@@ -4597,7 +4609,7 @@ async function handleToxicCheckInner(msg, sock, ownerJid, options = {}) {
         canonicalWord,
     });
 
-    if (isOwnerSender && !ANTI_TOXIC_WARN_OWNER_MESSAGES && !(isStickerOcr && ANTI_TOXIC_STICKER_WARN_FROM_ME)) {
+    if (isOwnerSender && !shouldWarnOwnerMessage(msg) && !(isStickerOcr && ANTI_TOXIC_STICKER_WARN_FROM_ME)) {
         console.log("[ANTI-TOXIC SKIP] owner exempt. Set ANTI_TOXIC_TEST_OWNER=true untuk testing.", {
             remoteJid,
             senderJid,
@@ -4908,7 +4920,7 @@ async function handleToxicCheckInner(msg, sock, ownerJid, options = {}) {
                 });
             }
         }
-    } else if (msg?.key?.fromMe && ANTI_TOXIC_WARN_OWNER_MESSAGES && normalizeJid(ownerJid)) {
+    } else if (msg?.key?.fromMe && shouldWarnOwnerMessage(msg) && normalizeJid(ownerJid)) {
         const ownerSelfTarget = normalizeJid(ownerJid);
         warningTargets = [ownerSelfTarget];
         warningRemoteJid = ownerSelfTarget;

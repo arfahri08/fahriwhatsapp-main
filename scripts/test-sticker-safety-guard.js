@@ -217,7 +217,7 @@ test("animated timestamps cover full duration", () => {
 });
 
 test("cache pipeline version invalidates old clean results", () => {
-    assert.strictEqual(guard.NSFW_PIPELINE_VERSION, "sticker-nsfw-v6-fast-background");
+    assert.strictEqual(guard.NSFW_PIPELINE_VERSION, "sticker-nsfw-v7-false-positive-guard");
     assert(source.includes("`${NSFW_PIPELINE_VERSION}:${hash}`"));
 });
 
@@ -248,7 +248,7 @@ test("ImageMagick is primary animated decoder", () => {
 test("local ONNX vision is integrated", () => {
     assert(source.includes('require("./localNsfwVision")'));
     assert(source.includes("inspectFrames(frames"));
-    assert(source.includes("sticker-nsfw-v6-fast-background"));
+    assert(source.includes("sticker-nsfw-v7-false-positive-guard"));
 });
 
 test("indeterminate result is not cached", () => {

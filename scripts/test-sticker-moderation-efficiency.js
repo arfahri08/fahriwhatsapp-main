@@ -25,7 +25,7 @@ async function main() {
     assert(ocrSource.includes("ANTI_TOXIC_STICKER_OCR_ANIMATED_FFMPEG_FALLBACK, false"));
     ok("animated OCR uses ImageMagick and avoids broken FFmpeg fallback by default");
 
-    assert.strictEqual(ocr.PIPELINE_VERSION, "anti-toxic-sticker-ocr-v5-restored");
+    assert.strictEqual(ocr.PIPELINE_VERSION, "anti-toxic-sticker-ocr-v5.3-balanced-psm");
     ok("OCR cache pipeline version changed");
 
     const samples = process.argv.slice(2).filter(file => fs.existsSync(file));

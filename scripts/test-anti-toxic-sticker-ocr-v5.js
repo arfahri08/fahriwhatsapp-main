@@ -6,7 +6,7 @@ const path = require("path")
 const ocr = require("../modules/antiToxicStickerOcr")
 
 async function run() {
-    assert.strictEqual(ocr.PIPELINE_VERSION, "anti-toxic-sticker-ocr-v5-restored")
+    assert.strictEqual(ocr.PIPELINE_VERSION, "anti-toxic-sticker-ocr-v5.3-balanced-psm")
 
     const toxicWords = ["anjing", "bangsat", "ngentot", "kontol"]
     for (const raw of ["NGENTOT", "N G E N T O T", "NGENT0T", "K0NT0L"]) {
