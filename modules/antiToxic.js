@@ -48,11 +48,10 @@ const ANTI_TOXIC_WARN_OWNER_MESSAGES = /^(1|true|yes|on)$/i.test(
     String(process.env.ANTI_TOXIC_WARN_OWNER_MESSAGES || process.env.ANTI_TOXIC_TEST_OWNER || "false").trim()
 );
 // Userbot menggunakan akun WhatsApp pemilik sebagai socket, sehingga pesan
-// manual pemilik di grup memiliki fromMe=true. Default: tetap beri warning di
-// grup, tetapi private chat pemilik tetap dikecualikan.
-const ANTI_TOXIC_WARN_OWNER_GROUP_MESSAGES = !/^(0|false|off|no)$/i.test(
-    String(process.env.ANTI_TOXIC_WARN_OWNER_GROUP_MESSAGES || "true").trim()
-);
+// manual pemilik di grup selalu memiliki fromMe=true. Nilai itu berasal dari
+// protokol WhatsApp dan tidak boleh dipaksa menjadi false. Pesan manual tersebut
+// wajib tetap dimoderasi di grup, terlepas dari nilai lama di .env. Pengecualian
+// owner hanya berlaku untuk private chat.
 const ANTI_TOXIC_STICKER_WARN_FROM_ME = /^(1|true|yes|on)$/i.test(
     String(process.env.ANTI_TOXIC_STICKER_WARN_FROM_ME || process.env.ANTI_TOXIC_TEST_STICKER_FROM_ME || "true").trim()
 );
@@ -697,8 +696,10 @@ function isGroupJid(jid) {
 }
 
 function shouldWarnOwnerMessage(msg) {
-    if (ANTI_TOXIC_WARN_OWNER_MESSAGES) return true;
-    return Boolean(ANTI_TOXIC_WARN_OWNER_GROUP_MESSAGES && isGroupJid(msg?.key?.remoteJid));
+    // fromMe=true pada pesan yang diketik langsung dari akun userbot adalah
+    // normal. Di grup, owner tidak pernah dikecualikan dari Anti Kasar.
+    if (isGroupJid(msg?.key?.remoteJid)) return true;
+    return ANTI_TOXIC_WARN_OWNER_MESSAGES;
 }
 
 function isBroadcastJid(jid) {
@@ -4112,7 +4113,7 @@ async function handleCekKasarCommand(msg, sock, ownerJid, text) {
     const canonicalWord = detected ? toxicMatch.word : "-";
     const detectionSource = getDebugDetectionSource(toxicMatch);
     const matchedInput = toxicMatch.matchedInput || toxicMatch.matchedNormalizedInput || "-";
-    const ownerExempt = Boolean(isOwner && !ANTI_TOXIC_WARN_OWNER_MESSAGES);
+    const ownerExempt = Boolean(isOwner && !shouldWarnOwnerMessage(msg));
 
     await safeSend(sock, remoteJid, {
         text: [
@@ -4153,7 +4154,7 @@ async function handleAntiToxicStatusCommand(msg, sock, ownerJid, text) {
             `Word count: ${words.length}`,
             `Owner JID: ${ownerJid || "-"}`,
             `Warn owner private: ${ANTI_TOXIC_WARN_OWNER_MESSAGES ? "true" : "false"}`,
-            `Warn owner/userbot di grup: ${ANTI_TOXIC_WARN_OWNER_GROUP_MESSAGES ? "true" : "false"}`,
+            `Warn owner/userbot di grup: true (wajib; fromMe tetap diproses)`,
             `Cooldown ms: ${ANTI_TOXIC_WARN_COOLDOWN_MS}`,
             `Send timeout: ${SEND_TIMEOUT_MS}`,
             `Send retry attempts: ${SEND_RETRY_ATTEMPTS}`,
@@ -5264,4 +5265,5 @@ module.exports = {
     clearAntiToxicStickerOcrCache: antiToxicStickerOcr.clearAntiToxicStickerOcrCache,
     disposeAntiToxicStickerOcr: antiToxicStickerOcr.disposeAntiToxicStickerOcr,
     buildStickerOcrWarningContext,
+    _shouldWarnOwnerMessageForTest: shouldWarnOwnerMessage,
 };
