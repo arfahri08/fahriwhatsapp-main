@@ -5,9 +5,9 @@ const flow = require("../modules/reminderContactFlow")
 
 const OWNER_CHAT = "628999999999@s.whatsapp.net"
 
-function message(text = "", message = null) {
+function message(text = "", message = null, id = `m-${Math.random()}`) {
     return {
-        key: { remoteJid: OWNER_CHAT, fromMe: true, id: `m-${Math.random()}` },
+        key: { remoteJid: OWNER_CHAT, fromMe: true, id },
         message: message || { conversation: text },
     }
 }
@@ -106,6 +106,57 @@ async function run() {
     assert(reminderCalls.every(item => item.text === "Jangan lupa ibadah malam"))
     assert.equal(flow.getSession(OWNER_CHAT), null, "session clears after save")
     assert(sends.at(-1).outbound.text.includes("REMINDER BERHASIL DISIMPAN"))
+
+    // Regression: event jam yang sama bisa masuk dua kali saat batch besar masih disimpan.
+    // Sesi harus dikunci sebelum await pertama agar hanya satu batch dibuat.
+    flow.disposeReminderContactFlow()
+    const concurrentSends = []
+    let batchCalls = 0
+    let releaseBatch
+    const batchGate = new Promise(resolve => { releaseBatch = resolve })
+    const concurrentSock = {
+        async sendMessage(targetJid, outbound) {
+            concurrentSends.push({ targetJid, outbound })
+            return { key: outbound.edit || promptKey }
+        },
+    }
+    const batchReminder = {
+        async addReminderBatch(targets, time, text, media, options) {
+            batchCalls += 1
+            assert.equal(targets.length, 2)
+            assert.equal(time, "20:15")
+            assert.equal(text, "Batch besar sekali kirim")
+            assert(options.batchId.includes("fixed-time-message"))
+            await batchGate
+            return { success: true, created: targets.length, duplicate: false }
+        },
+    }
+    const batchContext = text => ({
+        from: OWNER_CHAT,
+        text,
+        isGroup: false,
+        isOwner: true,
+        reminder: batchReminder,
+    })
+
+    await flow.handleReminderContactFlow(concurrentSock, message(".remind"), batchContext(".remind"))
+    await flow.handleReminderContactFlow(concurrentSock, message("", contactMessage), batchContext(""))
+    await flow.handleReminderContactFlow(concurrentSock, message("lanjut"), batchContext("lanjut"))
+    await flow.handleReminderContactFlow(
+        concurrentSock,
+        message("Batch besar sekali kirim"),
+        batchContext("Batch besar sekali kirim")
+    )
+
+    const fixedTimeMessage = message("20:15", null, "fixed-time-message")
+    const firstSave = flow.handleReminderContactFlow(concurrentSock, fixedTimeMessage, batchContext("20:15"))
+    const duplicateSave = flow.handleReminderContactFlow(concurrentSock, fixedTimeMessage, batchContext("20:15"))
+    assert.equal(batchCalls, 1, "duplicate time event must not start a second batch")
+    releaseBatch()
+    assert.equal(await firstSave, true)
+    assert.equal(await duplicateSave, true)
+    assert.equal(batchCalls, 1, "only one batch save after both handlers finish")
+    assert.equal(flow.getSession(OWNER_CHAT), null, "session clears after locked batch completes")
 
     flow.disposeReminderContactFlow()
     console.log("REMINDER_CONTACT_FLOW_TESTS_OK")

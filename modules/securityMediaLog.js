@@ -3,7 +3,7 @@ const path = require("path")
 
 const DEFAULT_SECURITY_MEDIA_LOG_JID = "120363424006225997@g.us"
 const SECURITY_LOG_BUILD = "2026-07-21.6"
-const STATE_PATH = path.join(__dirname, "../data/securityMediaLog.json")
+const STATE_PATH = path.resolve(process.env.SECURITY_MEDIA_LOG_STATE_PATH || path.join(__dirname, "../data/securityMediaLog.json"))
 const DEFAULT_DEDUPE_TTL_MS = 5 * 60 * 1000
 const MAX_LOG_TEXT_LENGTH = 3000
 
@@ -57,8 +57,32 @@ function getViewOnceLogJid() {
     return resolveConfiguredTarget("VIEWONCE_LOG_JID")
 }
 
-function getSecurityLogJid() {
-    return resolveConfiguredTarget("SECURITY_MEDIA_LOG_JID")
+function getSecurityLogJid(candidate = "") {
+    const envValue = String(process.env.SECURITY_MEDIA_LOG_JID || "").trim()
+    if (envValue) {
+        if (validateSecurityLogJid(envValue)) return envValue.toLowerCase()
+        const warningKey = `SECURITY_MEDIA_LOG_JID:${envValue}`
+        if (!warnedInvalidTargets.has(warningKey)) {
+            warnedInvalidTargets.add(warningKey)
+            console.log("[SECURITY LOG] SECURITY_MEDIA_LOG_JID tidak valid; mencoba target tersimpan.")
+        }
+    }
+
+    const directCandidate = String(candidate || "").trim()
+    if (validateSecurityLogJid(directCandidate)) return directCandidate.toLowerCase()
+
+    const cachedCandidate = String(state?.targetJid || "").trim()
+    if (stateLoaded && validateSecurityLogJid(cachedCandidate)) return cachedCandidate.toLowerCase()
+
+    try {
+        if (fs.existsSync(STATE_PATH)) {
+            const parsed = JSON.parse(fs.readFileSync(STATE_PATH, "utf8") || "{}")
+            const persisted = String(parsed?.targetJid || "").trim()
+            if (validateSecurityLogJid(persisted)) return persisted.toLowerCase()
+        }
+    } catch {}
+
+    return DEFAULT_SECURITY_MEDIA_LOG_JID
 }
 
 function isSecurityLogChat(jid) {
@@ -123,7 +147,7 @@ function loadState() {
                 ...fallback,
                 ...(parsed && typeof parsed === "object" ? parsed : {}),
                 version: 1,
-                targetJid: getSecurityLogJid(),
+                targetJid: getSecurityLogJid(parsed?.targetJid),
                 antiDeleteEnabled: parsed?.antiDeleteEnabled !== false,
                 viewOnceEnabled: parsed?.viewOnceEnabled !== false,
             }
@@ -152,7 +176,7 @@ function saveState(nextState) {
         ...defaultState(),
         ...(nextState || {}),
         version: 1,
-        targetJid: getSecurityLogJid(),
+        targetJid: getSecurityLogJid(nextState?.targetJid),
     }
     stateLoaded = true
     atomicWriteState(state)

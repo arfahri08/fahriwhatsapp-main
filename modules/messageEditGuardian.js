@@ -320,6 +320,80 @@ function extractEditedMessage(update) {
     return null
 }
 
+function findEditProtocol(container, depth = 0) {
+    if (!container || typeof container !== "object" || depth > 8) return null
+    if (
+        container.protocolMessage
+        && isEditProtocolType(container.protocolMessage.type)
+        && container.protocolMessage.editedMessage
+    ) {
+        return container.protocolMessage
+    }
+
+    for (const wrapper of [
+        container.ephemeralMessage,
+        container.viewOnceMessage,
+        container.viewOnceMessageV2,
+        container.documentWithCaptionMessage,
+    ]) {
+        const found = findEditProtocol(wrapper?.message, depth + 1)
+        if (found) return found
+    }
+    return null
+}
+
+function normalizeEditUpsertMessage(msg) {
+    if (!msg || typeof msg !== "object") return null
+    const editedMessage = extractEditedMessage(msg)
+    if (!editedMessage) return null
+
+    const protocol = findEditProtocol(msg.message)
+    const outerKey = msg.key && typeof msg.key === "object" ? msg.key : {}
+    const protocolKey = protocol?.key && typeof protocol.key === "object" ? protocol.key : {}
+    const remoteJid = normalizeJid(
+        protocolKey.remoteJid
+        || protocolKey.remoteJidAlt
+        || outerKey.remoteJid
+        || outerKey.remoteJidAlt
+    )
+    const id = String(protocolKey.id || outerKey.id || "").trim()
+    if (!isGroupJid(remoteJid) || !id) return null
+
+    const participant = normalizeJid(
+        protocolKey.participant
+        || protocolKey.participantAlt
+        || outerKey.participant
+        || outerKey.participantAlt
+        || msg.participant
+        || msg.participantAlt
+    )
+    const fromMe = protocolKey.fromMe == null
+        ? Boolean(outerKey.fromMe)
+        : Boolean(protocolKey.fromMe)
+
+    return {
+        key: {
+            ...outerKey,
+            ...protocolKey,
+            remoteJid,
+            id,
+            fromMe,
+            participant,
+            participantAlt: normalizeJid(protocolKey.participantAlt || outerKey.participantAlt),
+        },
+        update: {
+            message: msg.message,
+            messageTimestamp: protocol?.timestampMs || msg.messageTimestamp,
+        },
+        messageTimestamp: msg.messageTimestamp,
+        __editUpsertEventId: String(outerKey.id || ""),
+    }
+}
+
+function isMessageEditUpsert(msg) {
+    return Boolean(normalizeEditUpsertMessage(msg))
+}
+
 function normalizeMessageUpdate(update) {
     if (!update || typeof update !== "object") return null
     const editedMessage = extractEditedMessage(update)
@@ -792,22 +866,6 @@ async function handleMessageEditUpdate(update, context = {}) {
             return markSimpleResult(normalized, normalized.key.participant, "skipped")
         }
 
-        if (
-            typeof context.groupRemoteControl?.isGroupBotEnabled === "function"
-            && !context.groupRemoteControl.isGroupBotEnabled(groupJid)
-        ) {
-            const result = markSimpleResult(normalized, normalized.key.participant, "skipped", { skippedBotOff: 1 })
-            debugLog(normalized, "bot-off")
-            return result
-        }
-
-        if (
-            typeof context.groupRemoteControl?.isGroupFeatureEnabled === "function"
-            && !context.groupRemoteControl.isGroupFeatureEnabled(groupJid, "editGuardian")
-        ) {
-            return markSimpleResult(normalized, normalized.key.participant, "skipped")
-        }
-
         const cacheKey = makeOriginalCacheKey(groupJid, normalized.key.id)
         let cached = originalMessageCache.get(cacheKey) || null
         if (!cached) cached = await loadOriginalFallback(normalized, context)
@@ -927,6 +985,20 @@ async function handleMessageEditUpdate(update, context = {}) {
         }
 
         if (
+            typeof context.groupRemoteControl?.isGroupBotEnabled === "function"
+            && !context.groupRemoteControl.isGroupBotEnabled(groupJid)
+        ) {
+            return finishLoggedSkip("logged-bot-off", { skippedBotOff: 1 })
+        }
+
+        if (
+            typeof context.groupRemoteControl?.isGroupFeatureEnabled === "function"
+            && !context.groupRemoteControl.isGroupFeatureEnabled(groupJid, "editGuardian")
+        ) {
+            return finishLoggedSkip("logged-edit-off")
+        }
+
+        if (
             typeof context.groupRemoteControl?.isGroupFeatureEnabled === "function"
             && !context.groupRemoteControl.isGroupFeatureEnabled(groupJid, "antiToxic")
         ) {
@@ -1017,6 +1089,31 @@ async function handleMessageUpdates(updates, context = {}) {
     for (const update of list) {
         try {
             results.push(await handleMessageEditUpdate(update, context))
+        } catch (error) {
+            logFailure(error)
+            results.push({ handled: false, result: "error" })
+        }
+    }
+    return results
+}
+
+async function handleMessageEditUpsert(msg, context = {}) {
+    const update = normalizeEditUpsertMessage(msg)
+    if (!update) return { handled: false, result: "not-edit-upsert" }
+    const result = await handleMessageEditUpdate(update, context)
+    return {
+        ...result,
+        editEventId: update.__editUpsertEventId || "",
+        originalMessageId: update?.key?.id || "",
+    }
+}
+
+async function handleMessageEditUpserts(messages, context = {}) {
+    const list = Array.isArray(messages) ? messages : [messages].filter(Boolean)
+    const results = []
+    for (const msg of list) {
+        try {
+            results.push(await handleMessageEditUpsert(msg, context))
         } catch (error) {
             logFailure(error)
             results.push({ handled: false, result: "error" })
@@ -1266,6 +1363,10 @@ module.exports = {
     rememberOriginalMessage,
     handleMessageUpdates,
     handleMessageEditUpdate,
+    handleMessageEditUpsert,
+    handleMessageEditUpserts,
+    normalizeEditUpsertMessage,
+    isMessageEditUpsert,
     handleMessageEditGuardianCommand,
     normalizeMessageUpdate,
     extractEditedMessage,

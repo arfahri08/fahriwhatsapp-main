@@ -3147,11 +3147,38 @@ async function startBot() {
                 return upsert
             }
         })()
-        const messages = (upsert?.messages || [])
+        const incomingMessages = (upsert?.messages || [])
             .map(item => normalizeIncomingMessage(item, sock))
             .filter(item => !shouldIgnoreIncomingJid(item?.key?.remoteJid))
             .filter(item => !securityMediaLog.isSecurityLogChat(item?.key?.remoteJid) && !securityMediaLog.isSecurityLogChat(item?.key?.remoteJidAlt))
             .filter(Boolean)
+
+        const editUpserts = incomingMessages.filter(item => messageEditGuardian.isMessageEditUpsert(item))
+        if (editUpserts.length) {
+            try {
+                await messageEditGuardian.handleMessageEditUpserts(editUpserts, {
+                    sock,
+                    antiToxic,
+                    antiToxicControl,
+                    antiToxicReflectionConfig,
+                    groupRemoteControl,
+                    lidAliasStore,
+                    getMessage: getCachedMessageContent,
+                    ownerJid: getOwnerControlJid,
+                    routerTrace,
+                    isSecurityLogChat: jid => securityMediaLog.isSecurityLogChat(jid),
+                    isBotSentMessageId,
+                    securityMediaLog,
+                    contactNameStore,
+                })
+            } catch (error) {
+                console.log(`[EDIT GUARD] Failed to process messages.upsert edit: ${String(error.message || error).slice(0, 300)}`)
+            }
+        }
+
+        // Protocol edit adalah event kontrol, bukan pesan chat baru. Setelah dicatat,
+        // jangan lewatkan ke router command/auto-reply/downloader.
+        const messages = incomingMessages.filter(item => !messageEditGuardian.isMessageEditUpsert(item))
 
         if (process.env.VIEWONCE_DEBUG === "true") {
             console.log("[ViewOnce DEBUG] messages.upsert", {
@@ -4322,12 +4349,28 @@ async function startBot() {
                     // Kirim pesan status dan simpan key-nya
                     const statusMsg = await messageCleaner.sendTemporary(sock, from, "⏳ Sedang memproses dan menyimpan jadwal...");
 
-                    const results = [];
-                    for (const target of targets) {
-                        const success = await reminder.addReminder(target.jid, time, msgText, quotedMsg, {
-                            targetLabel: target.label,
-                        });
-                        results.push({ target, success });
+                    const batchId = `legacy:${String(from || "").toLowerCase()}:${String(msg?.key?.id || Date.now())}`;
+                    let results = [];
+                    if (typeof reminder.addReminderBatch === "function") {
+                        const batchResult = await reminder.addReminderBatch(
+                            targets,
+                            time,
+                            msgText,
+                            quotedMsg,
+                            { batchId }
+                        );
+                        results = targets.map(target => ({
+                            target,
+                            success: Boolean(batchResult?.success),
+                        }));
+                    } else {
+                        for (const target of targets) {
+                            const success = await reminder.addReminder(target.jid, time, msgText, quotedMsg, {
+                                targetLabel: target.label,
+                                batchId,
+                            });
+                            results.push({ target, success });
+                        }
                     }
                     const successCount = results.filter(item => item.success).length;
 

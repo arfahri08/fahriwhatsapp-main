@@ -190,6 +190,35 @@ async function run() {
     ))
     assert.equal(protocol.editedText, "Protocol edit")
 
+    const upsertEnvelope = {
+        key: {
+            remoteJid: GROUP,
+            id: "edit-envelope-event",
+            fromMe: false,
+            participant: SENDER,
+        },
+        messageTimestamp: 1700000100,
+        message: {
+            protocolMessage: {
+                type: 14,
+                key: {
+                    remoteJid: GROUP,
+                    id: "upsert-original-id",
+                    fromMe: false,
+                    participant: SENDER,
+                },
+                editedMessage: {
+                    conversation: "Edited through upsert",
+                },
+                timestampMs: 1700000100000,
+            },
+        },
+    }
+    const normalizedUpsert = guardian.normalizeEditUpsertMessage(upsertEnvelope)
+    assert(normalizedUpsert, "messages.upsert protocol edit must normalize")
+    assert.equal(normalizedUpsert.key.id, "upsert-original-id", "protocol key must point to original message id")
+    assert.equal(guardian.isMessageEditUpsert(upsertEnvelope), true, "upsert edit envelope detector")
+
     resetState()
     guardian.rememberOriginalMessage(originalMessage("array-edit", "Original array text"), { now: 1000 })
     const arrayCounters = { anti: 0, other: 0 }
@@ -216,6 +245,19 @@ async function run() {
     )
     assert.equal(duplicateLogResult.result, "duplicate", "duplicate edit log must be deduped")
     assert.equal(arrayCounters.logs.length, 1, "duplicate edit must not send another log")
+
+    resetState()
+    guardian.rememberOriginalMessage(originalMessage("upsert-original-id", "Original from upsert"), { now: 1000 })
+    const upsertCounters = { anti: 0, other: 0, logs: [] }
+    const upsertResult = await guardian.handleMessageEditUpsert(
+        upsertEnvelope,
+        makeContext({ counters: upsertCounters, botEnabled: false })
+    )
+    assert.equal(upsertResult.logSent, true, "messages.upsert edit must send security log")
+    assert.equal(upsertCounters.logs.length, 1, "messages.upsert edit sends exactly one log")
+    assert(upsertCounters.logs[0].outbound.text.includes("Original from upsert"), "upsert edit log keeps old text")
+    assert(upsertCounters.logs[0].outbound.text.includes("*Edited through upsert*"), "upsert edit log keeps new text")
+    assert.equal(upsertCounters.anti, 0, "Bot OFF upsert source skips moderation only")
 
     resetState()
     guardian.rememberOriginalMessage(originalMessage("same", "Halo semuanya"), { now: 1000 })
@@ -260,11 +302,14 @@ async function run() {
     assert.equal(counters.anti, 0)
 
     guardian.rememberOriginalMessage(originalMessage("bot-off", "Initial"), { now: 1000 })
+    const botOffLogsBefore = counters.logs.length
     result = await guardian.handleMessageEditUpdate(
         editUpdate("bot-off", { conversation: "kasar" }),
         makeContext({ counters, botEnabled: false })
     )
-    assert.equal(result.result, "skipped", "Bot OFF must skip")
+    assert.equal(result.result, "skipped", "Bot OFF must skip moderation")
+    assert.equal(result.logSent, true, "Bot OFF source group must still send edit log")
+    assert.equal(counters.logs.length, botOffLogsBefore + 1, "Bot OFF source group sends exactly one edit log")
     assert.equal(counters.anti, 0)
 
     guardian.rememberOriginalMessage(originalMessage("anti-off", "Initial"), { now: 1000 })

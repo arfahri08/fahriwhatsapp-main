@@ -320,6 +320,10 @@ async function handleReminderContactFlow(sock, msg, context = {}) {
         return true
     }
 
+    if (session.stage === "saving") {
+        return true
+    }
+
     if (session.stage === "time") {
         const time = normalizeTime(text)
         if (!time) {
@@ -332,36 +336,77 @@ async function handleReminderContactFlow(sock, msg, context = {}) {
             return true
         }
 
-        const reminderModule = context.reminder || require("./reminder")
-        const results = []
-        for (const target of session.targets) {
-            const success = await reminderModule.addReminder(
-                target.jid,
-                time,
-                session.messageText,
-                session.messageContent,
-                { targetLabel: target.label }
-            )
-            results.push({ target, success: Boolean(success) })
-        }
+        // Kunci sesi SEBELUM await pertama. Event WhatsApp yang sama kadang masuk
+        // lebih dari sekali; tanpa lock ini satu batch kontak bisa tersimpan 2-4 kali.
+        session.stage = "saving"
+        session.updatedAt = Date.now()
 
-        const successTargets = results.filter(item => item.success).map(item => item.target)
-        const failedTargets = results.filter(item => !item.success).map(item => item.target)
-        const lines = [
-            successTargets.length ? "✅ *REMINDER BERHASIL DISIMPAN*" : "❌ *REMINDER GAGAL DISIMPAN*",
-            "",
-            `Berhasil: ${successTargets.length}/${session.targets.length}`,
-            `Jam: *${time} WIB*`,
-            "",
-            "Target:",
-            formatTargets(successTargets.length ? successTargets : session.targets),
-        ]
-        if (failedTargets.length) {
-            lines.push("", "Gagal:", formatTargets(failedTargets))
+        const reminderModule = context.reminder || require("./reminder")
+        const targetsSnapshot = uniqueTargets(session.targets)
+        const messageTextSnapshot = session.messageText
+        const messageContentSnapshot = session.messageContent
+        const requestId = String(msg?.key?.id || `${Date.now()}`)
+        const batchId = `contact-flow:${normalizeKey(from)}:${requestId}`
+
+        try {
+            let successTargets = []
+            let failedTargets = []
+
+            if (typeof reminderModule.addReminderBatch === "function") {
+                const batchResult = await reminderModule.addReminderBatch(
+                    targetsSnapshot,
+                    time,
+                    messageTextSnapshot,
+                    messageContentSnapshot,
+                    { batchId }
+                )
+                if (batchResult?.success) successTargets = targetsSnapshot
+                else failedTargets = targetsSnapshot
+            } else {
+                const results = []
+                for (const target of targetsSnapshot) {
+                    const success = await reminderModule.addReminder(
+                        target.jid,
+                        time,
+                        messageTextSnapshot,
+                        messageContentSnapshot,
+                        { targetLabel: target.label, batchId }
+                    )
+                    results.push({ target, success: Boolean(success) })
+                }
+                successTargets = results.filter(item => item.success).map(item => item.target)
+                failedTargets = results.filter(item => !item.success).map(item => item.target)
+            }
+
+            session.stage = "done"
+            const lines = [
+                successTargets.length ? "✅ *REMINDER BERHASIL DISIMPAN*"
+                    : "❌ *REMINDER GAGAL DISIMPAN*",
+                "",
+                `Berhasil: ${successTargets.length}/${targetsSnapshot.length}`,
+                `Jam: *${time} WIB*`,
+                "",
+                "Target:",
+                formatTargets(successTargets.length ? successTargets : targetsSnapshot),
+            ]
+            if (failedTargets.length) {
+                lines.push("", "Gagal:", formatTargets(failedTargets))
+            }
+            await editPrompt(sock, session, lines.join("\n"))
+            sessions.delete(normalizeKey(from))
+            return true
+        } catch (error) {
+            session.stage = "time"
+            session.updatedAt = Date.now()
+            await editPrompt(sock, session, [
+                "❌ *REMINDER GAGAL DISIMPAN*",
+                "",
+                "Tidak ada batch tambahan yang dibuat.",
+                "Silakan kirim ulang jam setelah mengecek log bot.",
+            ].join("\n"))
+            console.log(`[REMINDER FLOW] Gagal simpan batch: ${String(error?.message || error).slice(0, 300)}`)
+            return true
         }
-        await editPrompt(sock, session, lines.join("\n"))
-        sessions.delete(normalizeKey(from))
-        return true
     }
 
     sessions.delete(normalizeKey(from))
