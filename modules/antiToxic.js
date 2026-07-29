@@ -44,17 +44,13 @@ const ANTI_TOXIC_STICKER_OCR_CACHE_LIMIT = Number(process.env.ANTI_TOXIC_STICKER
 const ANTI_TOXIC_STICKER_OCR_MAX_FRAMES = Math.max(1, Number(process.env.ANTI_TOXIC_STICKER_OCR_MAX_FRAMES || 4));
 const ANTI_TOXIC_STICKER_OCR_MAX_CANDIDATES = Math.max(1, Number(process.env.ANTI_TOXIC_STICKER_OCR_MAX_CANDIDATES || 14));
 const ANTI_TOXIC_STICKER_OCR_DEBUG = /^(1|true|yes|on)$/i.test(String(process.env.ANTI_TOXIC_STICKER_OCR_DEBUG || "false").trim());
-const ANTI_TOXIC_WARN_OWNER_MESSAGES = /^(1|true|yes|on)$/i.test(
-    String(process.env.ANTI_TOXIC_WARN_OWNER_MESSAGES || process.env.ANTI_TOXIC_TEST_OWNER || "false").trim()
-);
-// Userbot menggunakan akun WhatsApp pemilik sebagai socket, sehingga pesan
-// manual pemilik di grup selalu memiliki fromMe=true. Nilai itu berasal dari
-// protokol WhatsApp dan tidak boleh dipaksa menjadi false. Pesan manual tersebut
-// wajib tetap dimoderasi di grup, terlepas dari nilai lama di .env. Pengecualian
-// owner hanya berlaku untuk private chat.
-const ANTI_TOXIC_STICKER_WARN_FROM_ME = /^(1|true|yes|on)$/i.test(
-    String(process.env.ANTI_TOXIC_STICKER_WARN_FROM_ME || process.env.ANTI_TOXIC_TEST_STICKER_FROM_ME || "true").trim()
-);
+// OWNER_ANTI_TOXIC_EXEMPT_POLICY:
+// Akun userbot adalah akun WhatsApp owner. Semua pesan fromMe dan semua pesan
+// yang teridentifikasi sebagai owner wajib dikecualikan dari warning Anti Kasar,
+// baik di grup maupun private. Nilai .env lama sengaja diabaikan agar kebijakan
+// ini tidak dapat aktif kembali tanpa perubahan source yang disengaja.
+const ANTI_TOXIC_WARN_OWNER_MESSAGES = false;
+const ANTI_TOXIC_STICKER_WARN_FROM_ME = false;
 const EXACT_MATCH_IGNORED_WORDS = new Set();
 const antiToxicWarningLocks = new Map();
 const CLEAN_TOKEN_ALLOWLIST = new Set(
@@ -696,10 +692,10 @@ function isGroupJid(jid) {
 }
 
 function shouldWarnOwnerMessage(msg) {
-    // fromMe=true pada pesan yang diketik langsung dari akun userbot adalah
-    // normal. Di grup, owner tidak pernah dikecualikan dari Anti Kasar.
-    if (isGroupJid(msg?.key?.remoteJid)) return true;
-    return ANTI_TOXIC_WARN_OWNER_MESSAGES;
+    // Owner/userbot tidak pernah menjadi target warning Anti Kasar.
+    // Parameter dipertahankan agar API/test lama tetap kompatibel.
+    void msg;
+    return false;
 }
 
 function isBroadcastJid(jid) {
@@ -4153,8 +4149,8 @@ async function handleAntiToxicStatusCommand(msg, sock, ownerJid, text) {
             "ANTI-TOXIC STATUS",
             `Word count: ${words.length}`,
             `Owner JID: ${ownerJid || "-"}`,
-            `Warn owner private: ${ANTI_TOXIC_WARN_OWNER_MESSAGES ? "true" : "false"}`,
-            `Warn owner/userbot di grup: true (wajib; fromMe tetap diproses)`,
+            `Warn owner private: false (owner exempt)`,
+            `Warn owner/userbot di grup: false (owner exempt)`,
             `Cooldown ms: ${ANTI_TOXIC_WARN_COOLDOWN_MS}`,
             `Send timeout: ${SEND_TIMEOUT_MS}`,
             `Send retry attempts: ${SEND_RETRY_ATTEMPTS}`,
@@ -4433,9 +4429,7 @@ async function handleToxicCheckInner(msg, sock, ownerJid, options = {}) {
 
     if (
         msg?.key?.fromMe
-        && !shouldWarnOwnerMessage(msg)
         && !isAntiToxicOwnerCommandText(rawText)
-        && !(isStickerMessage(msg) && ANTI_TOXIC_STICKER_WARN_FROM_ME)
     ) {
         console.log("[ANTI-TOXIC SKIP] fromMe non-command", {
             id: msg?.key?.id,
@@ -4610,8 +4604,8 @@ async function handleToxicCheckInner(msg, sock, ownerJid, options = {}) {
         canonicalWord,
     });
 
-    if (isOwnerSender && !shouldWarnOwnerMessage(msg) && !(isStickerOcr && ANTI_TOXIC_STICKER_WARN_FROM_ME)) {
-        console.log("[ANTI-TOXIC SKIP] owner exempt. Set ANTI_TOXIC_TEST_OWNER=true untuk testing.", {
+    if (isOwnerSender) {
+        console.log("[ANTI-TOXIC SKIP] owner/userbot exempt", {
             remoteJid,
             senderJid,
             messageId: msg?.key?.id,

@@ -968,14 +968,6 @@ function isAntiToxicDebug() {
     return /^(1|true|yes|on)$/i.test(String(process.env.ANTI_TOXIC_DEBUG || "false").trim())
 }
 
-function isAntiToxicWarnOwnerEnabled() {
-    return /^(1|true|yes|on)$/i.test(String(
-        process.env.ANTI_TOXIC_WARN_OWNER_MESSAGES
-        || process.env.ANTI_TOXIC_TEST_OWNER
-        || "false"
-    ).trim())
-}
-
 function debugAntiToxicPipeline(stage, details = {}) {
     if (!isAntiToxicDebug()) return
     console.log("[ANTI-TOXIC PIPELINE]", { stage, ...details })
@@ -3172,11 +3164,9 @@ async function startBot() {
             const pipelineText = getAntiToxicPipelineText(item)
             const isMe = Boolean(item?.key?.fromMe)
             const isAntiToxicOwnerCommand = isAntiToxicOwnerCommandText(pipelineText)
-            const itemIsGroup = isGroupJid(item?.key?.remoteJid)
-            // Pesan yang benar-benar diketik dari akun userbot di grup memiliki
-            // fromMe=true. Tetap moderasi pesan itu; pesan keluaran bot disaring
-            // lebih dulu oleh isBotGeneratedMessage().
-            const allowFromMeTextModeration = isMe && (itemIsGroup || isAntiToxicWarnOwnerEnabled())
+            // OWNER_ANTI_TOXIC_EXEMPT_POLICY: fromMe adalah owner/userbot.
+            // Command owner tetap dirutekan, tetapi pesan biasa tidak dimoderasi.
+            const allowFromMeTextModeration = false
             const shouldSkipBotGenerated = isMe
                 && !isAntiToxicOwnerCommand
                 && (
@@ -3251,11 +3241,9 @@ async function startBot() {
             const pipelineText = getAntiToxicPipelineText(item)
             const isMe = Boolean(item?.key?.fromMe)
             const isAntiToxicOwnerCommand = isAntiToxicOwnerCommandText(pipelineText)
-            const itemIsGroup = isGroupJid(item?.key?.remoteJid)
-            // Pesan yang benar-benar diketik dari akun userbot di grup memiliki
-            // fromMe=true. Tetap moderasi pesan itu; pesan keluaran bot disaring
-            // lebih dulu oleh isBotGeneratedMessage().
-            const allowFromMeTextModeration = isMe && (itemIsGroup || isAntiToxicWarnOwnerEnabled())
+            // OWNER_ANTI_TOXIC_EXEMPT_POLICY: fromMe adalah owner/userbot.
+            // Command owner tetap dirutekan, tetapi pesan biasa tidak dimoderasi.
+            const allowFromMeTextModeration = false
             if (isMe && !isAntiToxicOwnerCommand && !allowFromMeTextModeration) continue
 
             const itemFrom = item?.key?.remoteJid || ""
@@ -3627,16 +3615,11 @@ async function startBot() {
         if (antiToxicControlHandled) return
 
         const selectedMessageTypes = getMessageTypeKeys(msg)
-        const allowFromMeStickerModeration = isMe
-            && selectedMessageTypes.includes("stickerMessage")
-            && /^(1|true|yes|on)$/i.test(String(
-            process.env.ANTI_TOXIC_STICKER_WARN_FROM_ME
-                || process.env.ANTI_TOXIC_TEST_STICKER_FROM_ME
-                || "true"
-            ).trim())
-        // Pesan manual dari akun userbot di grup ikut Anti Kasar. Pesan bot
-        // sendiri tetap dilewati melalui isBotGeneratedMessage(msg).
-        const allowFromMeTextModeration = isMe && (isGroup || isAntiToxicWarnOwnerEnabled())
+        // OWNER_ANTI_TOXIC_EXEMPT_POLICY: teks maupun stiker dari owner/userbot
+        // tidak boleh memicu warning terhadap akun sendiri. Command owner tetap
+        // lolos karena pengecekan skip di bawah mengecualikan owner command.
+        const allowFromMeStickerModeration = false
+        const allowFromMeTextModeration = false
         const skipAntiToxicBecauseBotGenerated = isMe && isBotGeneratedMessage(msg)
         const skipAntiToxicBecauseFromMeNonCommand = isMe
             && !isAntiToxicOwnerCommand
