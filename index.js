@@ -84,6 +84,7 @@ const routerTrace = {
 };
 const reactionWorkflow = require("./modules/reactionWorkflow");
 const messageEditGuardian = require("./modules/messageEditGuardian");
+const messageEditRuntimeBridge = require("./modules/messageEditRuntimeBridge");
 const loginManager = require("./modules/login");
 const backup = require("./modules/backup");
 
@@ -2444,6 +2445,9 @@ function cleanupSocket(sock) {
         reactionWorkflow.disposeReactionWorkflow(sock)
     } catch {}
     try {
+        messageEditRuntimeBridge.disposeMessageEditRuntimeBridge()
+    } catch {}
+    try {
         messageEditGuardian.disposeMessageEditGuardian()
     } catch {}
     try {
@@ -2827,6 +2831,26 @@ async function startBot() {
         getMessage: getCachedMessageContent,
     })
 
+    messageEditRuntimeBridge.installMessageEditRuntimeBridge(sock, () => ({
+        sock,
+        messageEditGuardian,
+        securityMediaLog,
+        contactNameStore,
+        antiToxic,
+        antiToxicControl,
+        antiToxicReflectionConfig,
+        groupRemoteControl,
+        lidAliasStore,
+        routerTrace,
+        getMessage: getCachedMessageContent,
+        rememberMessageContent,
+        getMessageSenderJid,
+        ownerJid: getOwnerControlJid,
+        isSecurityLogChat: jid => securityMediaLog.isSecurityLogChat(jid),
+        isBotSentMessageId,
+        isBotGeneratedMessage,
+    }))
+
     installUnsupportedIncomingMessageFilter(sock)
     activeSock = sock
     global.sock = sock
@@ -3118,25 +3142,8 @@ async function startBot() {
             }
         }
 
-        try {
-            await messageEditGuardian.handleMessageUpdates(updates, {
-                sock,
-                antiToxic,
-                antiToxicControl,
-                antiToxicReflectionConfig,
-                groupRemoteControl,
-                lidAliasStore,
-                getMessage: getCachedMessageContent,
-                ownerJid: getOwnerControlJid,
-                routerTrace,
-                isSecurityLogChat: jid => securityMediaLog.isSecurityLogChat(jid),
-                isBotSentMessageId,
-                securityMediaLog,
-                contactNameStore,
-            })
-        } catch (error) {
-            console.log(`[EDIT GUARD] Failed to process message edit: ${String(error.message || error).slice(0, 300)}`)
-        }
+        // Edit logging dan moderation diproses langsung oleh messageEditRuntimeBridge
+        // di titik sock.ev.emit, sebelum listener/filter lain dapat melewatkan event.
     })
 
     sock.ev.on("messages.upsert", async (upsert) => {
@@ -3157,27 +3164,8 @@ async function startBot() {
             .filter(item => !securityMediaLog.isSecurityLogChat(item?.key?.remoteJid) && !securityMediaLog.isSecurityLogChat(item?.key?.remoteJidAlt))
 
         const editUpserts = rawIncomingMessages.filter(item => messageEditGuardian.isMessageEditUpsert(item))
-        if (editUpserts.length) {
-            try {
-                await messageEditGuardian.handleMessageEditUpserts(editUpserts, {
-                    sock,
-                    antiToxic,
-                    antiToxicControl,
-                    antiToxicReflectionConfig,
-                    groupRemoteControl,
-                    lidAliasStore,
-                    getMessage: getCachedMessageContent,
-                    ownerJid: getOwnerControlJid,
-                    routerTrace,
-                    isSecurityLogChat: jid => securityMediaLog.isSecurityLogChat(jid),
-                    isBotSentMessageId,
-                    securityMediaLog,
-                    contactNameStore,
-                })
-            } catch (error) {
-                console.log(`[EDIT GUARD] Failed to process messages.upsert edit: ${String(error.message || error).slice(0, 300)}`)
-            }
-        }
+        // Runtime bridge sudah memproses payload RAW di sock.ev.emit. Di sini edit hanya
+        // dipisahkan agar tidak masuk router command/auto-reply/downloader.
 
         // Protocol edit adalah event kontrol, bukan pesan chat baru. Setelah dicatat,
         // jangan lewatkan ke router command/auto-reply/downloader.
@@ -3955,6 +3943,10 @@ async function startBot() {
             senderJid,
             groupRemoteControl,
             antiToxicControl,
+            securityMediaLog,
+            contactNameStore,
+            ownerJid: getOwnerControlJid,
+            messageEditRuntimeBridge,
         }))
         if (messageEditGuardianHandled) return
 

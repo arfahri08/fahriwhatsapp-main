@@ -651,6 +651,9 @@ function sanitizeLogText(value, fallback = "(tidak tersedia)", limit = 1600) {
 }
 
 async function sendEditedMessageLog(context = {}, details = {}) {
+    if (context.skipEditLog === true) {
+        return { sent: false, reason: "runtime-bridge-owned" }
+    }
     const sock = context.sock
     const securityMediaLog = context.securityMediaLog
     if (!sock || typeof sock.sendMessage !== "function") return { sent: false, reason: "no-sock" }
@@ -1249,6 +1252,7 @@ function getGuardianHelpText() {
         "✏️ *EDITED MESSAGE GUARDIAN*",
         "",
         ".editguard status",
+        ".editguard test",
         ".editguard on",
         ".editguard off",
         ".editguard set <group_jid> on/off",
@@ -1276,6 +1280,31 @@ async function handleMessageEditGuardianCommand(sock, msg, context = {}) {
     const parts = text.split(/\s+/)
     const action = String(parts[1] || "help").toLowerCase()
     const state = getState()
+
+
+    if (action === "test") {
+        const ownerValue = normalizeJid(
+            typeof context.ownerJid === "function" ? context.ownerJid() : context.ownerJid
+        ) || from
+        const result = await sendEditedMessageLog({
+            sock,
+            securityMediaLog: context.securityMediaLog,
+            contactNameStore: context.contactNameStore,
+        }, {
+            chatJid: from,
+            messageId: `EDIT-TEST-${Date.now()}`,
+            senderJid: ownerValue,
+            pushName: "Owner",
+            originalText: "Ini contoh pesan sebelum diedit.",
+            editedText: "Ini contoh pesan sesudah diedit.",
+        })
+        await sock.sendMessage(from, {
+            text: result?.sent
+                ? `✅ Test edit log berhasil dikirim ke ${result.targetJid}.`
+                : `❌ Test edit log gagal: ${result?.reason || "unknown"}`,
+        })
+        return true
+    }
 
     if (action === "on" || action === "off") {
         state.global.enabled = action === "on"
@@ -1331,11 +1360,14 @@ async function handleMessageEditGuardianCommand(sock, msg, context = {}) {
 
     if (action === "status") {
         const health = getMessageEditGuardianHealth()
+        const tapHealth = context.messageEditRuntimeBridge?.getMessageEditRuntimeBridgeHealth?.() || null
         await sock.sendMessage(from, {
             text: [
                 "✏️ *EDITED MESSAGE GUARDIAN*",
                 "",
                 `Status Global: ${health?.enabled ? "ON" : "OFF"}`,
+                `Runtime Tap: ${tapHealth?.installed ? "AKTIF" : "TIDAK AKTIF"}`,
+                `Runtime Build: ${tapHealth?.build || "UNKNOWN"}`,
                 "Scope Log: Group + Private Chat",
                 "Action: Semua edit masuk Security Log",
                 "Anti Kasar: diperiksa ulang khusus grup",
