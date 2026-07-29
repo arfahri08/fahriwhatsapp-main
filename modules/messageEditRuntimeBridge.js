@@ -1,8 +1,9 @@
 const crypto = require("crypto")
 const fs = require("fs")
 const path = require("path")
+const secretEncryptedEdit = require("./secretEncryptedEdit")
 
-const BUILD = "EDIT-TAP-2026-07-29.1"
+const BUILD = "EDIT-SECRET-2026-07-29.1"
 const TRACE_PATH = path.resolve(
     process.env.EDIT_TAP_TRACE_PATH
     || path.join(__dirname, "../data/editEventTrace.jsonl")
@@ -64,7 +65,7 @@ function sanitizeTraceValue(value, depth = 0) {
     if (typeof value === "object") {
         const out = {}
         for (const key of Object.keys(value).slice(0, 25)) {
-            if (/mediaKey|fileSha256|fileEncSha256|jpegThumbnail|thumbnail|ciphertext/i.test(key)) {
+            if (/mediaKey|messageSecret|encPayload|encIv|fileSha256|fileEncSha256|jpegThumbnail|thumbnail|ciphertext/i.test(key)) {
                 out[key] = "[redacted-binary]"
             } else {
                 out[key] = sanitizeTraceValue(value[key], depth + 1)
@@ -140,6 +141,7 @@ function detectEditShape(update, guardian) {
 }
 
 function getSenderJid(normalized, context = {}) {
+    if (normalized?.senderJid) return normalizeJid(normalized.senderJid)
     const key = normalized?.key || {}
     const chatJid = normalizeJid(key.remoteJid || key.remoteJidAlt)
     const owner = normalizeJid(typeof context.ownerJid === "function" ? context.ownerJid() : context.ownerJid)
@@ -151,13 +153,24 @@ function getSenderJid(normalized, context = {}) {
 }
 
 function makeCacheMessage(normalized) {
+    const editedMessage = normalized?.editedMessage || { conversation: normalized?.editedText || "" }
+    const messageSecret = normalized?.originalMessageSecret
+    const message = messageSecret
+        ? {
+            ...editedMessage,
+            messageContextInfo: {
+                ...(editedMessage?.messageContextInfo || {}),
+                messageSecret: Buffer.from(messageSecret),
+            },
+        }
+        : editedMessage
     return {
         key: {
             ...(normalized?.key || {}),
             remoteJid: normalized?.key?.remoteJid,
             id: normalized?.key?.id,
         },
-        message: normalized?.editedMessage || { conversation: normalized?.editedText || "" },
+        message,
         messageTimestamp: Math.floor(Date.now() / 1000),
         participant: normalized?.key?.participant,
         participantAlt: normalized?.key?.participantAlt,
@@ -165,6 +178,7 @@ function makeCacheMessage(normalized) {
 }
 
 async function getOriginalText(normalized, context, guardian) {
+    if (String(normalized?.originalText || "").trim()) return String(normalized.originalText).trim()
     try {
         if (typeof context.getMessage !== "function") return ""
         const content = await context.getMessage(normalized.key)
@@ -313,6 +327,22 @@ function handleMessagesUpsertEvent(upsert) {
     const editCandidates = []
 
     for (const msg of messages) {
+        if (secretEncryptedEdit.isSecretEncryptedEditMessage(msg)) {
+            const envelope = secretEncryptedEdit.getSecretEnvelope(msg)
+            console.log(`[EDIT SECRET] RAW messages.upsert chat=${msg?.key?.remoteJid || msg?.key?.remoteJidAlt || "-"} shellId=${msg?.key?.id || "-"} targetId=${envelope?.targetMessageKey?.id || "-"}`)
+            appendTrace("secret-encrypted-edit-raw", {
+                type: upsert?.type,
+                key: msg?.key,
+                shellMessageId: msg?.key?.id,
+                targetMessageKey: envelope?.targetMessageKey,
+                secretEncType: envelope?.secretEncType,
+                ivBytes: secretEncryptedEdit.toBuffer(envelope?.encIv)?.length || 0,
+                payloadBytes: secretEncryptedEdit.toBuffer(envelope?.encPayload)?.length || 0,
+            })
+            editCandidates.push({ secretMessage: msg })
+            continue
+        }
+
         let isEdit = false
         try { isEdit = Boolean(guardian?.isMessageEditUpsert?.(msg)) } catch {}
 
@@ -358,6 +388,41 @@ function handleMessagesUpsertEvent(upsert) {
     if (!editCandidates.length) return
     enqueue("messages.upsert", async () => {
         for (const item of editCandidates) {
+            if (item.secretMessage) {
+                const liveContext = getContext()
+                const decrypted = await secretEncryptedEdit.decryptSecretEncryptedEdit(item.secretMessage, liveContext)
+                if (!decrypted?.ok) {
+                    const targetId = secretEncryptedEdit.getSecretEnvelope(item.secretMessage)?.targetMessageKey?.id || "-"
+                    console.log(`[EDIT SECRET] DECRYPT-FAILED reason=${decrypted?.reason || "unknown"} targetId=${targetId} attempts=${decrypted?.attempts || 0} detail=${decrypted?.lastFailure || "-"}`)
+                    appendTrace("secret-encrypted-edit-failed", {
+                        reason: decrypted?.reason,
+                        targetMessageId: targetId,
+                        attempts: decrypted?.attempts,
+                        originalSenderCount: decrypted?.originalSenderCount,
+                        modificationSenderCount: decrypted?.modificationSenderCount,
+                        lastFailure: decrypted?.lastFailure,
+                    })
+                    continue
+                }
+                console.log(`[EDIT SECRET] DECRYPTED chat=${decrypted.normalized?.key?.remoteJid || "-"} id=${decrypted.normalized?.key?.id || "-"} sender=${decrypted.normalized?.senderJid || "-"}`)
+                appendTrace("secret-encrypted-edit-decrypted", {
+                    chatJid: decrypted.normalized?.key?.remoteJid,
+                    messageId: decrypted.normalized?.key?.id,
+                    senderJid: decrypted.normalized?.senderJid,
+                    shellMessageId: decrypted.normalized?.secretMetadata?.shellMessageId,
+                    originalText: decrypted.normalized?.originalText,
+                    editedText: decrypted.normalized?.editedText,
+                })
+                const result = await processNormalizedEdit(
+                    decrypted.normalized,
+                    decrypted.syntheticUpdate,
+                    "messages.upsert.secretEncryptedMessage"
+                )
+                if (result?.result === "sent") {
+                    console.log(`[EDIT SECRET] SENT chat=${decrypted.normalized?.key?.remoteJid || "-"} id=${decrypted.normalized?.key?.id || "-"}`)
+                }
+                continue
+            }
             await processNormalizedEdit(item.normalized, item.update, "messages.upsert")
         }
     })
@@ -427,4 +492,5 @@ module.exports = {
     getMessageEditRuntimeBridgeHealth,
     handleMessagesUpdateEvent,
     handleMessagesUpsertEvent,
+    isSecretEncryptedEditMessage: secretEncryptedEdit.isSecretEncryptedEditMessage,
 }

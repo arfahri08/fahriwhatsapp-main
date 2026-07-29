@@ -2849,6 +2849,7 @@ async function startBot() {
         isSecurityLogChat: jid => securityMediaLog.isSecurityLogChat(jid),
         isBotSentMessageId,
         isBotGeneratedMessage,
+        proto: baileys.proto,
     }))
 
     installUnsupportedIncomingMessageFilter(sock)
@@ -3163,14 +3164,17 @@ async function startBot() {
             .filter(item => !shouldIgnoreIncomingJid(item?.key?.remoteJid || item?.key?.remoteJidAlt))
             .filter(item => !securityMediaLog.isSecurityLogChat(item?.key?.remoteJid) && !securityMediaLog.isSecurityLogChat(item?.key?.remoteJidAlt))
 
-        const editUpserts = rawIncomingMessages.filter(item => messageEditGuardian.isMessageEditUpsert(item))
-        // Runtime bridge sudah memproses payload RAW di sock.ev.emit. Di sini edit hanya
-        // dipisahkan agar tidak masuk router command/auto-reply/downloader.
+        const isEditControlMessage = item => (
+            messageEditGuardian.isMessageEditUpsert(item)
+            || messageEditRuntimeBridge.isSecretEncryptedEditMessage(item)
+        )
+        const editUpserts = rawIncomingMessages.filter(isEditControlMessage)
+        // Runtime bridge sudah memproses payload RAW di sock.ev.emit. Di sini semua
+        // event kontrol edit (legacy maupun secretEncryptedMessage) dipisahkan agar
+        // tidak masuk router command/auto-reply/downloader/anti-toxic sebagai teks kosong.
 
-        // Protocol edit adalah event kontrol, bukan pesan chat baru. Setelah dicatat,
-        // jangan lewatkan ke router command/auto-reply/downloader.
         const messages = rawIncomingMessages
-            .filter(item => !messageEditGuardian.isMessageEditUpsert(item))
+            .filter(item => !isEditControlMessage(item))
             .map(item => normalizeIncomingMessage(item, sock))
             .filter(Boolean)
 
