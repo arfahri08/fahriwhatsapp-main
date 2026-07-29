@@ -45,6 +45,8 @@ const targetedStatusDownloader = require("./modules/targetedStatusDownloader")
 const statusInbox = require("./modules/statusInbox")
 const incomingMediaLogger = require("./modules/incomingMediaLogger")
 const reminder = require("./modules/reminder");
+const reminderContactFlow = require("./modules/reminderContactFlow");
+const contactNameStore = require("./modules/contactNameStore");
 const help = require("./modules/help");
 const autoReply = require("./modules/autoReply");
 const manualAutoReplyPause = require("./modules/manualAutoReplyPause");
@@ -2050,8 +2052,18 @@ function installPhoneNumberAliasTracker(sock) {
         }
     })
 
-    sock.ev.on("contacts.update", (updates = []) => {
-        for (const contact of updates || []) {
+    const processContactBatch = (contacts = [], source = "contacts.update") => {
+        const list = Array.isArray(contacts) ? contacts : []
+        try {
+            contactNameStore.rememberContacts(list, { source })
+        } catch (error) {
+            console.log("[CONTACT NAME] Gagal menyimpan batch kontak", {
+                source,
+                errorMessage: error.message,
+            })
+        }
+
+        for (const contact of list) {
             try {
                 const lidCandidates = [
                     contact?.lid,
@@ -2061,33 +2073,38 @@ function installPhoneNumberAliasTracker(sock) {
 
                 const pnCandidates = [
                     contact?.phoneNumber,
-                    contact?.notify,
-                    contact?.verifiedName,
                     contact?.id,
                     contact?.jid,
                 ].filter(jid => isPrivatePnJid(jid))
 
                 for (const lid of lidCandidates) {
                     lidAliasStore.rememberSeenLid(lid, {
-                        source: "contacts.update",
+                        source,
                         pushName: contact?.name || contact?.notify || "",
                     })
 
                     for (const pn of pnCandidates) {
                         lidAliasStore.rememberAlias(lid, pn, {
-                            source: "contacts.update",
+                            source,
                             pushName: contact?.name || contact?.notify || "",
                         })
                     }
                 }
             } catch (error) {
-                console.log("[LID ALIAS] Gagal proses contacts.update", {
+                console.log("[LID ALIAS] Gagal proses contact", {
+                    source,
                     id: contact?.id,
                     jid: contact?.jid,
                     errorMessage: error.message,
                 })
             }
         }
+    }
+
+    sock.ev.on("contacts.update", updates => processContactBatch(updates, "contacts.update"))
+    sock.ev.on("contacts.upsert", contacts => processContactBatch(contacts, "contacts.upsert"))
+    sock.ev.on("messaging-history.set", ({ contacts = [] } = {}) => {
+        processContactBatch(contacts, "messaging-history.set")
     })
 
     sock.__phoneNumberAliasTrackerInstalled = true
@@ -2430,6 +2447,12 @@ function cleanupSocket(sock) {
         messageEditGuardian.disposeMessageEditGuardian()
     } catch {}
     try {
+        reminderContactFlow.disposeReminderContactFlow()
+    } catch {}
+    try {
+        contactNameStore.disposeContactNameStore()
+    } catch {}
+    try {
         const ocrDispose = antiToxicStickerOcr.disposeAntiToxicStickerOcr()
         if (ocrDispose && typeof ocrDispose.catch === "function") {
             ocrDispose.catch(error => {
@@ -2452,7 +2475,7 @@ function cleanupSocket(sock) {
         }
     } catch {}
 
-    const events = ["messages.upsert", "messages.update", "messages.reaction", "connection.update", "creds.update", "call", "groups.update", "group-participants.update", "chats.phoneNumberShare", "contacts.update"]
+    const events = ["messages.upsert", "messages.update", "messages.reaction", "connection.update", "creds.update", "call", "groups.update", "group-participants.update", "chats.phoneNumberShare", "contacts.update", "contacts.upsert", "messaging-history.set"]
     for (const eventName of events) {
         try {
             if (typeof sock.ev.removeAllListeners === "function") {
@@ -3107,6 +3130,9 @@ async function startBot() {
                 ownerJid: getOwnerControlJid,
                 routerTrace,
                 isSecurityLogChat: jid => securityMediaLog.isSecurityLogChat(jid),
+                isBotSentMessageId,
+                securityMediaLog,
+                contactNameStore,
             })
         } catch (error) {
             console.log(`[EDIT GUARD] Failed to process message edit: ${String(error.message || error).slice(0, 300)}`)
@@ -3188,6 +3214,13 @@ async function startBot() {
             }
 
             trackLidAliasFromMessage(item)
+            try {
+                contactNameStore.rememberIncomingMessage(item, {
+                    senderJid: getMessageSenderJid(item, sock),
+                })
+            } catch (error) {
+                console.log(`[CONTACT NAME] Gagal cache nama incoming: ${String(error.message || error).slice(0, 200)}`)
+            }
             if (!hasMessageContent(item)) {
                 debugAntiToxicPipeline("skip-empty-message-shell", {
                     id: item?.key?.id,
@@ -3485,6 +3518,16 @@ async function startBot() {
             })
             if (handled) return
         }
+        const reminderContactFlowHandled = await routerTrace.run(msg, traceContext, "reminderContactFlow", () => reminderContactFlow.handleReminderContactFlow(sock, msg, {
+            from,
+            text,
+            isGroup,
+            isOwner: canControlOwner,
+            senderJid,
+            reminder,
+        }))
+        if (reminderContactFlowHandled) return
+
         const sendAutoReplyWithForward = async (replyMessage, originalText = text) => {
             if (!autoReply.shouldProcessMessage(msg, { botEnabled: botStatus.getStatus() })) return false
             const sent = await autoReplyForwarder.sendAutoReply(sock, from, replyMessage, {

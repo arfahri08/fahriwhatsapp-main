@@ -378,7 +378,7 @@ function makeLightOriginalMessage(msg, participant) {
             remoteJid: normalizeJid(msg?.key?.remoteJid),
             remoteJidAlt: normalizeJid(msg?.key?.remoteJidAlt),
             id: String(msg?.key?.id || ""),
-            fromMe: false,
+            fromMe: Boolean(msg?.key?.fromMe),
             participant: normalizeJid(msg?.key?.participant || participant),
             participantAlt: normalizeJid(msg?.key?.participantAlt),
         },
@@ -420,7 +420,7 @@ function rememberOriginalMessage(msg, context = {}) {
         const key = msg?.key || {}
         const remoteJid = normalizeJid(key.remoteJid || key.remoteJidAlt)
         const messageId = String(key.id || "").trim()
-        if (!isGroupJid(remoteJid) || !messageId || key.fromMe || context.isBotGenerated) return false
+        if (!isGroupJid(remoteJid) || !messageId || context.isBotGenerated) return false
 
         const originalText = extractMessageText(msg?.message)
         if (!originalText) return false
@@ -511,6 +511,92 @@ function debugLog(normalized, result, extra = {}) {
 
 function logFailure(error) {
     console.log(`[EDIT GUARD] Failed to process message edit: ${String(error?.message || error || "unknown").slice(0, 300)}`)
+}
+
+function getJidNumber(value) {
+    return String(value || "").split("@")[0].split(":")[0].replace(/[^0-9]/g, "")
+}
+
+function normalizeMentionJid(value) {
+    const clean = normalizeJid(value)
+    if (/^\d+@s\.whatsapp\.net$/i.test(clean) || /^\d+@lid$/i.test(clean)) return clean
+    return ""
+}
+
+function sanitizeInlineName(value) {
+    return String(value || "")
+        .normalize("NFKC")
+        .replace(/[\r\n\t]+/g, " ")
+        .replace(/\s+/g, " ")
+        .replace(/\*/g, "＊")
+        .trim()
+        .slice(0, 100)
+}
+
+function sanitizeLogText(value, fallback = "(tidak tersedia)", limit = 1600) {
+    const clean = String(value || "")
+        .normalize("NFKC")
+        .replace(/\*/g, "＊")
+        .trim()
+    if (!clean) return fallback
+    if (clean.length <= limit) return clean
+    return `${clean.slice(0, Math.max(0, limit - 14))}... (dipotong)`
+}
+
+async function sendEditedMessageLog(context = {}, details = {}) {
+    const sock = context.sock
+    const securityMediaLog = context.securityMediaLog
+    if (!sock || typeof sock.sendMessage !== "function") return { sent: false, reason: "no-sock" }
+    if (!securityMediaLog || typeof securityMediaLog.getSecurityLogJid !== "function") {
+        return { sent: false, reason: "no-target" }
+    }
+
+    const targetJid = securityMediaLog.getSecurityLogJid()
+    if (!isGroupJid(targetJid)) return { sent: false, reason: "invalid-target" }
+
+    const mentionJid = normalizeMentionJid(details.senderJid)
+    const number = getJidNumber(mentionJid || details.senderJid)
+    const mentionText = number ? `@${number}` : String(details.senderJid || "Tidak diketahui")
+    const contactName = sanitizeInlineName(
+        context.contactNameStore?.resolveContactName?.(details.senderJid, [
+            details.contactName,
+            details.pushName,
+        ])
+        || details.contactName
+        || details.pushName
+    )
+    const senderLine = `Pengirim: ${mentionText}${contactName ? ` (${contactName})` : ""}`
+    const oldText = sanitizeLogText(details.originalText)
+    const newText = sanitizeLogText(details.editedText)
+    const text = [
+        "> ✏️ *JEJAK EDIT PESAN TERDETEKSI*",
+        "",
+        senderLine,
+        "",
+        "Pesan lama:",
+        oldText,
+        "",
+        "Pesan baru:",
+        `*${newText}*`,
+    ].join("\n")
+    const outbound = {
+        text,
+        ...(mentionJid ? { mentions: [mentionJid] } : {}),
+    }
+
+    try {
+        const result = await sock.sendMessage(targetJid, outbound)
+        return { sent: true, targetJid, result, text, mentionJid, contactName }
+    } catch (error) {
+        if (mentionJid) {
+            try {
+                const result = await sock.sendMessage(targetJid, { text })
+                return { sent: true, targetJid, result, text, mentionJid: "", contactName, fallback: true }
+            } catch {}
+        }
+        console.log(`[EDIT GUARD] Gagal kirim log edit: ${String(error?.message || error).slice(0, 240)}`)
+        return { sent: false, targetJid, reason: "send-failed" }
+    }
 }
 
 function applyStatsDelta(state, delta = {}) {
@@ -689,11 +775,14 @@ async function handleMessageEditUpdate(update, context = {}) {
         })
         persistState(state)
 
-        if (normalized.key.fromMe) {
-            return markSimpleResult(normalized, "", "skipped")
+        const groupJid = normalized.key.remoteJid
+        if (
+            typeof context.isBotSentMessageId === "function"
+            && context.isBotSentMessageId(normalized.key.id)
+        ) {
+            return markSimpleResult(normalized, normalized.key.participant, "skipped")
         }
 
-        const groupJid = normalized.key.remoteJid
         const guardianConfig = getMessageEditGuardianConfig(groupJid)
         if (!guardianConfig.enabled) {
             return markSimpleResult(normalized, normalized.key.participant, "skipped")
@@ -714,15 +803,6 @@ async function handleMessageEditUpdate(update, context = {}) {
 
         if (
             typeof context.groupRemoteControl?.isGroupFeatureEnabled === "function"
-            && !context.groupRemoteControl.isGroupFeatureEnabled(groupJid, "antiToxic")
-        ) {
-            const result = markSimpleResult(normalized, normalized.key.participant, "skipped", { skippedAntiToxicOff: 1 })
-            debugLog(normalized, "anti-toxic-off")
-            return result
-        }
-
-        if (
-            typeof context.groupRemoteControl?.isGroupFeatureEnabled === "function"
             && !context.groupRemoteControl.isGroupFeatureEnabled(groupJid, "editGuardian")
         ) {
             return markSimpleResult(normalized, normalized.key.participant, "skipped")
@@ -732,15 +812,22 @@ async function handleMessageEditUpdate(update, context = {}) {
         let cached = originalMessageCache.get(cacheKey) || null
         if (!cached) cached = await loadOriginalFallback(normalized, context)
 
+        const ownerValue = typeof context.ownerJid === "function" ? context.ownerJid() : context.ownerJid
         const rawParticipant = normalizeJid(
             normalized.key.participant
             || cached?.participant
             || cached?.originalMessage?.key?.participant
+            || (normalized.key.fromMe ? ownerValue : "")
         )
         if (!rawParticipant) {
             return markSimpleResult(normalized, "", "skipped")
         }
-        const senderJid = resolveSenderJid(cached?.senderJid || rawParticipant, context)
+        const senderJid = resolveSenderJid(
+            cached?.senderJid
+            || (normalized.key.fromMe ? ownerValue : "")
+            || rawParticipant,
+            context
+        )
         if (!senderJid) {
             return markSimpleResult(normalized, rawParticipant, "skipped")
         }
@@ -773,6 +860,7 @@ async function handleMessageEditUpdate(update, context = {}) {
             cached?.originalMessage || {
                 key: { ...normalized.key, participant: rawParticipant, fromMe: false },
                 participant: rawParticipant,
+                pushName: cached?.pushName || "",
             },
             { ...normalized, key: { ...normalized.key, participant: rawParticipant } },
             normalized.editedMessage,
@@ -784,12 +872,6 @@ async function handleMessageEditUpdate(update, context = {}) {
         if (rawParticipant.endsWith("@lid") && senderJid.endsWith("@s.whatsapp.net")) {
             syntheticMessage.key.participantAlt = senderJid
             syntheticMessage.participantAlt = senderJid
-        }
-
-        updateCachedVersion(cacheKey, cached, syntheticMessage, normalized, senderJid, now)
-
-        if (/^\s*\./.test(normalized.editedText)) {
-            return markSimpleResult(normalized, senderJid, "skipped")
         }
 
         if (!claimEdit(normalized, editedTextHash, now)) {
@@ -806,17 +888,70 @@ async function handleMessageEditUpdate(update, context = {}) {
             return { handled: false, result: "duplicate", editedTextHash }
         }
 
+        const logResult = await sendEditedMessageLog(context, {
+            senderJid,
+            pushName: cached?.originalMessage?.pushName || syntheticMessage?.pushName || "",
+            originalText,
+            editedText: normalized.editedText,
+        })
+
+        updateCachedVersion(cacheKey, cached, syntheticMessage, normalized, senderJid, now)
+
+        const finishLoggedSkip = (recentResult, statsDelta = {}) => {
+            finalizeClaim(normalized, editedTextHash, recentResult, now)
+            persistRecent({
+                groupJid,
+                messageId: normalized.key.id,
+                senderJid,
+                editedTextHash,
+                result: recentResult,
+                matchedWordsMasked: [],
+                editedAt: normalized.editedAt,
+            }, statsDelta)
+            debugLog(normalized, recentResult)
+            return {
+                handled: false,
+                result: "skipped",
+                editedTextHash,
+                logSent: logResult.sent === true,
+                logTargetJid: logResult.targetJid || "",
+            }
+        }
+
+        if (normalized.key.fromMe) {
+            return finishLoggedSkip("logged-owner")
+        }
+
+        if (/^\s*\./.test(normalized.editedText)) {
+            return finishLoggedSkip("logged-command")
+        }
+
+        if (
+            typeof context.groupRemoteControl?.isGroupFeatureEnabled === "function"
+            && !context.groupRemoteControl.isGroupFeatureEnabled(groupJid, "antiToxic")
+        ) {
+            return finishLoggedSkip("logged", { skippedAntiToxicOff: 1 })
+        }
+
         if (
             typeof context.antiToxicControl?.shouldRunAntiToxic === "function"
             && !context.antiToxicControl.shouldRunAntiToxic(syntheticMessage)
         ) {
-            finalizeClaim(normalized, editedTextHash, "skipped", now)
-            return markSimpleResult(normalized, senderJid, "skipped", { skippedAntiToxicOff: 1 })
+            return finishLoggedSkip("logged", { skippedAntiToxicOff: 1 })
         }
 
         if (typeof context.antiToxic?.handleToxicCheck !== "function") {
             finalizeClaim(normalized, editedTextHash, "error", now)
-            return markSimpleResult(normalized, senderJid, "error")
+            persistRecent({
+                groupJid,
+                messageId: normalized.key.id,
+                senderJid,
+                editedTextHash,
+                result: "error",
+                matchedWordsMasked: [],
+                editedAt: normalized.editedAt,
+            })
+            return { handled: false, result: "error", editedTextHash, logSent: logResult.sent === true }
         }
 
         let handled = false
@@ -824,7 +959,7 @@ async function handleMessageEditUpdate(update, context = {}) {
             handled = Boolean(await context.antiToxic.handleToxicCheck(
                 syntheticMessage,
                 context.sock,
-                typeof context.ownerJid === "function" ? context.ownerJid() : context.ownerJid,
+                ownerValue,
                 {
                     groupPrivateReply: Boolean(
                         context.groupRemoteControl?.isGroupAntiToxicPrivateReplyEnabled?.(groupJid)
@@ -844,7 +979,7 @@ async function handleMessageEditUpdate(update, context = {}) {
                 editedAt: normalized.editedAt,
             })
             logFailure(error)
-            return { handled: false, result: "error", editedTextHash }
+            return { handled: false, result: "error", editedTextHash, logSent: logResult.sent === true }
         }
 
         const result = handled ? "toxic" : "clean"
@@ -863,7 +998,13 @@ async function handleMessageEditUpdate(update, context = {}) {
             ...(handled ? { lastToxicEditAt: now } : {}),
         })
         debugLog(normalized, result, { handled })
-        return { handled, result, editedTextHash }
+        return {
+            handled,
+            result,
+            editedTextHash,
+            logSent: logResult.sent === true,
+            logTargetJid: logResult.targetJid || "",
+        }
     } catch (error) {
         logFailure(error)
         return { handled: false, result: "error" }
@@ -914,7 +1055,7 @@ function getMessageEditGuardianHealth() {
         const config = getMessageEditGuardianConfig()
         return {
             enabled: config.globalEnabled,
-            scope: "Group Anti Kasar",
+            scope: "Group Edit Log + Anti Kasar",
             cacheSize: originalMessageCache.size,
             cacheMax: config.cacheMax,
             dedupeSize: processedEditCache.size,
@@ -960,10 +1101,10 @@ function getEffectiveGroupStatus(groupJid, context = {}) {
     const antiControlEnabled = context.antiToxicControl?.shouldRunAntiToxic
         ? context.antiToxicControl.shouldRunAntiToxic(synthetic)
         : true
-    let effectiveStatus = "ACTIVE"
+    let effectiveStatus = "ACTIVE — Log + Anti Kasar"
     if (!botEnabled) effectiveStatus = "DISABLED — Bot group OFF"
-    else if (!antiToxicEnabled || !antiControlEnabled) effectiveStatus = "DISABLED — Anti Kasar OFF"
     else if (!guardianEnabled) effectiveStatus = "DISABLED — Edited Message Guardian OFF"
+    else if (!antiToxicEnabled || !antiControlEnabled) effectiveStatus = "ACTIVE — Log only (Anti Kasar OFF)"
     return {
         botEnabled,
         antiToxicEnabled: antiToxicEnabled && antiControlEnabled,
@@ -1065,10 +1206,10 @@ async function handleMessageEditGuardianCommand(sock, msg, context = {}) {
                 "",
                 `Status Global: ${health?.enabled ? "ON" : "OFF"}`,
                 "Scope: Group Only",
-                "Action: Re-check with Anti Kasar",
+                "Action: Security Log + Re-check Anti Kasar",
                 "Private Chat: OFF",
                 "Group Bot OFF: SKIPPED",
-                "Group Anti Kasar OFF: SKIPPED",
+                "Group Anti Kasar OFF: LOG ONLY",
                 "",
                 `Cache: ${health?.cacheSize ?? "UNKNOWN"} / ${health?.cacheMax ?? "UNKNOWN"}`,
                 `Processed Edits: ${health?.processedEdits ?? "UNKNOWN"}`,
@@ -1130,6 +1271,7 @@ module.exports = {
     extractEditedMessage,
     extractMessageText,
     buildSyntheticEditedMessage,
+    sendEditedMessageLog,
     getMessageEditGuardianConfig,
     isMessageEditGuardianEnabled,
     cleanupMessageEditCache,

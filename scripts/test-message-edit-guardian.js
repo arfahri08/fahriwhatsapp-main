@@ -92,11 +92,24 @@ function editUpdate(id, editedMessage, options = {}) {
 }
 
 function makeContext(overrides = {}) {
-    const counters = overrides.counters || { anti: 0, other: 0 }
+    const counters = overrides.counters || { anti: 0, other: 0, logs: [] }
+    if (!Array.isArray(counters.logs)) counters.logs = []
     return {
         now: overrides.now || 2000,
-        sock: {},
+        sock: {
+            async sendMessage(targetJid, outbound) {
+                counters.logs.push({ targetJid, outbound })
+                return { key: { id: `log-${counters.logs.length}`, remoteJid: targetJid, fromMe: true } }
+            },
+        },
         ownerJid: "628999999999@s.whatsapp.net",
+        securityMediaLog: {
+            getSecurityLogJid: () => "120363424006225997@g.us",
+        },
+        contactNameStore: {
+            resolveContactName: () => "Nama Kontak Saya",
+        },
+        isBotSentMessageId: () => false,
         antiToxic: {
             async handleToxicCheck(msg) {
                 counters.anti += 1
@@ -188,6 +201,22 @@ async function run() {
     assert.equal(arrayCounters.anti, 1, "messages.update array must call only Anti Kasar")
     assert.equal(arrayCounters.other, 0, "messages.update array must not call other routers")
 
+    assert.equal(arrayCounters.logs.length, 1, "valid edit must send one security log")
+    const editLog = arrayCounters.logs[0]
+    assert.equal(editLog.targetJid, "120363424006225997@g.us", "edit log must use configured security log group")
+    assert(editLog.outbound.text.includes("> ✏️ *JEJAK EDIT PESAN TERDETEKSI*"), "edit log title")
+    assert(editLog.outbound.text.includes("Pengirim: @628222222222 (Nama Kontak Saya)"), "sender mention and saved contact name")
+    assert(editLog.outbound.text.includes("Pesan lama:\nOriginal array text"), "old message must be present")
+    assert(editLog.outbound.text.includes("Pesan baru:\n*Edited array text*"), "new message must be bold")
+    assert.deepEqual(editLog.outbound.mentions, [SENDER], "sender must be mentioned")
+
+    const duplicateLogResult = await guardian.handleMessageEditUpdate(
+        editUpdate("array-edit", { conversation: "Edited array text" }),
+        makeContext({ counters: arrayCounters, now: 2100 })
+    )
+    assert.equal(duplicateLogResult.result, "duplicate", "duplicate edit log must be deduped")
+    assert.equal(arrayCounters.logs.length, 1, "duplicate edit must not send another log")
+
     resetState()
     guardian.rememberOriginalMessage(originalMessage("same", "Halo semuanya"), { now: 1000 })
     let counters = { anti: 0, other: 0 }
@@ -213,12 +242,21 @@ async function run() {
     assert.equal(result.result, "private")
     assert.equal(counters.anti, 0)
 
-    guardian.rememberOriginalMessage(originalMessage("from-me", "Initial"), { now: 1000 })
+    guardian.rememberOriginalMessage(originalMessage("from-me", "Initial", {
+        fromMe: true,
+        participant: "628999999999@s.whatsapp.net",
+    }), { now: 1000 })
+    const ownerLogBefore = counters.logs.length
     result = await guardian.handleMessageEditUpdate(
-        editUpdate("from-me", { conversation: "kasar" }, { fromMe: true }),
+        editUpdate("from-me", { conversation: "kasar" }, {
+            fromMe: true,
+            participant: "628999999999@s.whatsapp.net",
+        }),
         makeContext({ counters })
     )
-    assert.equal(result.result, "skipped", "fromMe edit must skip")
+    assert.equal(result.result, "skipped", "fromMe edit must skip moderation")
+    assert.equal(result.logSent, true, "manual owner group edit should still be logged")
+    assert.equal(counters.logs.length, ownerLogBefore + 1, "owner edit sends exactly one log")
     assert.equal(counters.anti, 0)
 
     guardian.rememberOriginalMessage(originalMessage("bot-off", "Initial"), { now: 1000 })
