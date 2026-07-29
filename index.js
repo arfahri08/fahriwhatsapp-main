@@ -3147,13 +3147,16 @@ async function startBot() {
                 return upsert
             }
         })()
-        const incomingMessages = (upsert?.messages || [])
-            .map(item => normalizeIncomingMessage(item, sock))
-            .filter(item => !shouldIgnoreIncomingJid(item?.key?.remoteJid))
-            .filter(item => !securityMediaLog.isSecurityLogChat(item?.key?.remoteJid) && !securityMediaLog.isSecurityLogChat(item?.key?.remoteJidAlt))
+        // Proses event edit dari payload RAW sebelum normalisasi pesan biasa.
+        // Pada Baileys v7 protocolMessage MESSAGE_EDIT dapat membawa key chat/original
+        // yang berbeda dari shell event; normalisasi terlalu dini bisa menghilangkan
+        // identitas chat yang dibutuhkan guardian.
+        const rawIncomingMessages = (upsert?.messages || [])
             .filter(Boolean)
+            .filter(item => !shouldIgnoreIncomingJid(item?.key?.remoteJid || item?.key?.remoteJidAlt))
+            .filter(item => !securityMediaLog.isSecurityLogChat(item?.key?.remoteJid) && !securityMediaLog.isSecurityLogChat(item?.key?.remoteJidAlt))
 
-        const editUpserts = incomingMessages.filter(item => messageEditGuardian.isMessageEditUpsert(item))
+        const editUpserts = rawIncomingMessages.filter(item => messageEditGuardian.isMessageEditUpsert(item))
         if (editUpserts.length) {
             try {
                 await messageEditGuardian.handleMessageEditUpserts(editUpserts, {
@@ -3178,7 +3181,10 @@ async function startBot() {
 
         // Protocol edit adalah event kontrol, bukan pesan chat baru. Setelah dicatat,
         // jangan lewatkan ke router command/auto-reply/downloader.
-        const messages = incomingMessages.filter(item => !messageEditGuardian.isMessageEditUpsert(item))
+        const messages = rawIncomingMessages
+            .filter(item => !messageEditGuardian.isMessageEditUpsert(item))
+            .map(item => normalizeIncomingMessage(item, sock))
+            .filter(Boolean)
 
         if (process.env.VIEWONCE_DEBUG === "true") {
             console.log("[ViewOnce DEBUG] messages.upsert", {
@@ -3263,6 +3269,7 @@ async function startBot() {
             try {
                 messageEditGuardian.rememberOriginalMessage(item, {
                     senderJid: getMessageSenderJid(item, sock),
+                    ownerJid: getOwnerControlJid(),
                     lidAliasStore,
                     isBotGenerated: isBotGeneratedMessage(item),
                 })

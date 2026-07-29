@@ -78,6 +78,26 @@ function isGroupJid(value) {
     return normalizeJid(value).endsWith("@g.us")
 }
 
+function isPrivateJid(value) {
+    const jid = normalizeJid(value)
+    return jid.endsWith("@s.whatsapp.net") || jid.endsWith("@lid")
+}
+
+function isChatJid(value) {
+    return isGroupJid(value) || isPrivateJid(value)
+}
+
+function pickChatJid(...values) {
+    const candidates = values
+        .flat(Infinity)
+        .map(normalizeJid)
+        .filter(isChatJid)
+    return candidates.find(isGroupJid)
+        || candidates.find(jid => jid.endsWith("@s.whatsapp.net"))
+        || candidates.find(jid => jid.endsWith("@lid"))
+        || ""
+}
+
 function normalizeComparisonText(value) {
     return String(value || "")
         .normalize("NFKC")
@@ -101,7 +121,7 @@ function sanitizeTimestamp(value, fallback = Date.now()) {
 
 function sanitizeRecentRecord(record = {}) {
     return {
-        groupJid: isGroupJid(record.groupJid) ? normalizeJid(record.groupJid) : "",
+        groupJid: isChatJid(record.groupJid) ? normalizeJid(record.groupJid) : "",
         messageId: String(record.messageId || "").slice(0, 160),
         senderJid: normalizeJid(record.senderJid).slice(0, 160),
         editedTextHash: /^[a-f0-9]{64}$/i.test(String(record.editedTextHash || ""))
@@ -117,7 +137,7 @@ function sanitizeRecentRecord(record = {}) {
 
 function sanitizeDedupeRecord(record = {}) {
     return {
-        groupJid: isGroupJid(record.groupJid) ? normalizeJid(record.groupJid) : "",
+        groupJid: isChatJid(record.groupJid) ? normalizeJid(record.groupJid) : "",
         messageId: String(record.messageId || "").slice(0, 160),
         editedTextHash: /^[a-f0-9]{64}$/i.test(String(record.editedTextHash || ""))
             ? String(record.editedTextHash).toLowerCase()
@@ -305,7 +325,7 @@ function findEditedPayload(container, depth = 0) {
     return null
 }
 
-function extractEditedMessage(update) {
+function extractEditedMessage(update, options = {}) {
     const updateBody = update?.update && typeof update.update === "object" ? update.update : update
     const candidates = [
         updateBody?.message,
@@ -317,6 +337,16 @@ function extractEditedMessage(update) {
         const found = findEditedPayload(candidate)
         if (found && extractMessageText(found)) return found
     }
+
+    // Baileys v7 mematerialisasi MESSAGE_EDIT menjadi messages.update dengan
+    // update.message berisi konten BARU secara langsung (tanpa protocolMessage).
+    // Jalur ini hanya boleh dipakai oleh handler messages.update, bukan detector
+    // messages.upsert biasa, agar pesan normal tidak dianggap sebagai edit.
+    if (options.allowDirectUpdateMessage === true) {
+        const direct = unwrapEditedPayload(update?.update?.message)
+        if (direct && extractMessageText(direct)) return direct
+    }
+
     return null
 }
 
@@ -350,14 +380,14 @@ function normalizeEditUpsertMessage(msg) {
     const protocol = findEditProtocol(msg.message)
     const outerKey = msg.key && typeof msg.key === "object" ? msg.key : {}
     const protocolKey = protocol?.key && typeof protocol.key === "object" ? protocol.key : {}
-    const remoteJid = normalizeJid(
-        protocolKey.remoteJid
-        || protocolKey.remoteJidAlt
-        || outerKey.remoteJid
-        || outerKey.remoteJidAlt
+    const remoteJid = pickChatJid(
+        outerKey.remoteJid,
+        outerKey.remoteJidAlt,
+        protocolKey.remoteJid,
+        protocolKey.remoteJidAlt
     )
     const id = String(protocolKey.id || outerKey.id || "").trim()
-    if (!isGroupJid(remoteJid) || !id) return null
+    if (!isChatJid(remoteJid) || !id) return null
 
     const participant = normalizeJid(
         protocolKey.participant
@@ -396,16 +426,16 @@ function isMessageEditUpsert(msg) {
 
 function normalizeMessageUpdate(update) {
     if (!update || typeof update !== "object") return null
-    const editedMessage = extractEditedMessage(update)
+    const editedMessage = extractEditedMessage(update, { allowDirectUpdateMessage: true })
     if (!editedMessage) return null
 
     const body = update.update && typeof update.update === "object" ? update.update : update
     const key = update.key || body.key || {}
-    const remoteJid = normalizeJid(key.remoteJid || key.remoteJidAlt)
+    const remoteJid = pickChatJid(key.remoteJid, key.remoteJidAlt)
     const id = String(key.id || "").trim()
     const editedText = extractMessageText(editedMessage)
 
-    if (!isGroupJid(remoteJid) || !id || !editedText) return null
+    if (!isChatJid(remoteJid) || !id || !editedText) return null
 
     return {
         isEdit: true,
@@ -492,9 +522,9 @@ function cleanupMessageEditCache(now = Date.now()) {
 function rememberOriginalMessage(msg, context = {}) {
     try {
         const key = msg?.key || {}
-        const remoteJid = normalizeJid(key.remoteJid || key.remoteJidAlt)
+        const remoteJid = pickChatJid(key.remoteJid, key.remoteJidAlt)
         const messageId = String(key.id || "").trim()
-        if (!isGroupJid(remoteJid) || !messageId || context.isBotGenerated) return false
+        if (!isChatJid(remoteJid) || !messageId || context.isBotGenerated) return false
 
         const originalText = extractMessageText(msg?.message)
         if (!originalText) return false
@@ -504,6 +534,9 @@ function rememberOriginalMessage(msg, context = {}) {
             || key.participantAlt
             || msg?.participant
             || msg?.participantAlt
+            || context.senderJid
+            || (key.fromMe ? context.ownerJid : "")
+            || (!isGroupJid(remoteJid) ? remoteJid : "")
         )
         if (!participant) return false
 
@@ -660,11 +693,13 @@ async function sendEditedMessageLog(context = {}, details = {}) {
 
     try {
         const result = await sock.sendMessage(targetJid, outbound)
+        console.log(`[EDIT GUARD] Log edit terkirim ke ${targetJid} untuk ${details.chatJid || "chat"}:${details.messageId || "-"}`)
         return { sent: true, targetJid, result, text, mentionJid, contactName }
     } catch (error) {
         if (mentionJid) {
             try {
                 const result = await sock.sendMessage(targetJid, { text })
+                console.log(`[EDIT GUARD] Log edit terkirim tanpa mention ke ${targetJid} untuk ${details.chatJid || "chat"}:${details.messageId || "-"}`)
                 return { sent: true, targetJid, result, text, mentionJid: "", contactName, fallback: true }
             } catch {}
         }
@@ -825,17 +860,8 @@ async function loadOriginalFallback(normalized, context = {}) {
 
 async function handleMessageEditUpdate(update, context = {}) {
     try {
-        const rawEditedMessage = extractEditedMessage(update)
+        const rawEditedMessage = extractEditedMessage(update, { allowDirectUpdateMessage: true })
         if (!rawEditedMessage) return { handled: false, result: "not-edit" }
-
-        const rawKey = update?.key || update?.update?.key || {}
-        const rawRemoteJid = normalizeJid(rawKey.remoteJid || rawKey.remoteJidAlt)
-        if (!isGroupJid(rawRemoteJid)) {
-            const state = getState()
-            applyStatsDelta(state, { skippedPrivate: 1 })
-            persistState(state)
-            return { handled: false, result: "private" }
-        }
 
         const normalized = normalizeMessageUpdate(update)
         if (!normalized) return { handled: false, result: "invalid-edit" }
@@ -858,7 +884,7 @@ async function handleMessageEditUpdate(update, context = {}) {
         }
 
         const guardianConfig = getMessageEditGuardianConfig(groupJid)
-        if (!guardianConfig.enabled) {
+        if (!guardianConfig.globalEnabled) {
             return markSimpleResult(normalized, normalized.key.participant, "skipped")
         }
 
@@ -876,6 +902,7 @@ async function handleMessageEditUpdate(update, context = {}) {
             || cached?.participant
             || cached?.originalMessage?.key?.participant
             || (normalized.key.fromMe ? ownerValue : "")
+            || (!isGroupJid(groupJid) ? groupJid : "")
         )
         if (!rawParticipant) {
             return markSimpleResult(normalized, "", "skipped")
@@ -947,6 +974,8 @@ async function handleMessageEditUpdate(update, context = {}) {
         }
 
         const logResult = await sendEditedMessageLog(context, {
+            chatJid: groupJid,
+            messageId: normalized.key.id,
             senderJid,
             pushName: cached?.originalMessage?.pushName || syntheticMessage?.pushName || "",
             originalText,
@@ -982,6 +1011,11 @@ async function handleMessageEditUpdate(update, context = {}) {
 
         if (/^\s*\./.test(normalized.editedText)) {
             return finishLoggedSkip("logged-command")
+        }
+
+        // PM hanya dicatat ke grup log. Moderasi Anti Kasar tetap khusus grup.
+        if (!isGroupJid(groupJid)) {
+            return finishLoggedSkip("logged-private", { skippedPrivate: 1 })
         }
 
         if (
@@ -1152,7 +1186,7 @@ function getMessageEditGuardianHealth() {
         const config = getMessageEditGuardianConfig()
         return {
             enabled: config.globalEnabled,
-            scope: "Group Edit Log + Anti Kasar",
+            scope: "Group + Private Edit Log; Anti Kasar khusus grup",
             cacheSize: originalMessageCache.size,
             cacheMax: config.cacheMax,
             dedupeSize: processedEditCache.size,
@@ -1199,8 +1233,8 @@ function getEffectiveGroupStatus(groupJid, context = {}) {
         ? context.antiToxicControl.shouldRunAntiToxic(synthetic)
         : true
     let effectiveStatus = "ACTIVE — Log + Anti Kasar"
-    if (!botEnabled) effectiveStatus = "DISABLED — Bot group OFF"
-    else if (!guardianEnabled) effectiveStatus = "DISABLED — Edited Message Guardian OFF"
+    if (!guardianEnabled) effectiveStatus = "ACTIVE — Log only (group moderation OFF)"
+    else if (!botEnabled) effectiveStatus = "ACTIVE — Log only (Bot group OFF)"
     else if (!antiToxicEnabled || !antiControlEnabled) effectiveStatus = "ACTIVE — Log only (Anti Kasar OFF)"
     return {
         botEnabled,
@@ -1302,10 +1336,10 @@ async function handleMessageEditGuardianCommand(sock, msg, context = {}) {
                 "✏️ *EDITED MESSAGE GUARDIAN*",
                 "",
                 `Status Global: ${health?.enabled ? "ON" : "OFF"}`,
-                "Scope: Group Only",
-                "Action: Security Log + Re-check Anti Kasar",
-                "Private Chat: OFF",
-                "Group Bot OFF: SKIPPED",
+                "Scope Log: Group + Private Chat",
+                "Action: Semua edit masuk Security Log",
+                "Anti Kasar: diperiksa ulang khusus grup",
+                "Group Bot OFF: LOG TETAP AKTIF",
                 "Group Anti Kasar OFF: LOG ONLY",
                 "",
                 `Cache: ${health?.cacheSize ?? "UNKNOWN"} / ${health?.cacheMax ?? "UNKNOWN"}`,
@@ -1324,7 +1358,7 @@ async function handleMessageEditGuardianCommand(sock, msg, context = {}) {
         if (!recent.length) lines.push("Belum ada metadata edit.")
         recent.forEach((item, index) => {
             lines.push(`${index + 1}. ${formatWib(item.editedAt)} — ${item.result}`)
-            lines.push(`Group: ${maskJid(item.groupJid)}`)
+            lines.push(`Chat: ${maskJid(item.groupJid)}`)
             lines.push(`Sender: ${maskJid(item.senderJid)}`)
             lines.push(`Message ID: ${String(item.messageId || "-").slice(0, 12)}`)
             lines.push(`Result: ${item.result === "toxic" ? "Anti Kasar handled" : item.result === "clean" ? "No violation" : item.result}`)

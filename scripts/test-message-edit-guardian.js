@@ -91,6 +91,25 @@ function editUpdate(id, editedMessage, options = {}) {
     }
 }
 
+function materializedEditUpdate(id, editedMessage, options = {}) {
+    return {
+        key: {
+            remoteJid: options.remoteJid || GROUP,
+            remoteJidAlt: options.remoteJidAlt,
+            id,
+            fromMe: Boolean(options.fromMe),
+            participant: options.participant,
+            participantAlt: options.participantAlt,
+        },
+        update: {
+            // Bentuk nyata hasil process-message Baileys v7 untuk MESSAGE_EDIT:
+            // konten baru langsung berada di update.message.
+            message: editedMessage,
+            messageTimestamp: 1700000100,
+        },
+    }
+}
+
 function makeContext(overrides = {}) {
     const counters = overrides.counters || { anti: 0, other: 0, logs: [] }
     if (!Array.isArray(counters.logs)) counters.logs = []
@@ -190,6 +209,14 @@ async function run() {
     ))
     assert.equal(protocol.editedText, "Protocol edit")
 
+    const materialized = guardian.normalizeMessageUpdate(materializedEditUpdate(
+        "materialized",
+        { conversation: "Materialized direct edit" },
+        { participant: SENDER }
+    ))
+    assert(materialized, "Baileys v7 direct update.message edit must normalize")
+    assert.equal(materialized.editedText, "Materialized direct edit")
+
     const upsertEnvelope = {
         key: {
             remoteJid: GROUP,
@@ -218,6 +245,35 @@ async function run() {
     assert(normalizedUpsert, "messages.upsert protocol edit must normalize")
     assert.equal(normalizedUpsert.key.id, "upsert-original-id", "protocol key must point to original message id")
     assert.equal(guardian.isMessageEditUpsert(upsertEnvelope), true, "upsert edit envelope detector")
+
+    const privateUpsertEnvelope = {
+        key: { remoteJid: PRIVATE, id: "private-edit-event", fromMe: false },
+        message: {
+            protocolMessage: {
+                type: 14,
+                key: { remoteJid: PRIVATE, id: "private-original-id", fromMe: false },
+                editedMessage: { conversation: "Private upsert edit" },
+            },
+        },
+    }
+    const normalizedPrivateUpsert = guardian.normalizeEditUpsertMessage(privateUpsertEnvelope)
+    assert(normalizedPrivateUpsert, "private messages.upsert edit must normalize")
+    assert.equal(normalizedPrivateUpsert.key.remoteJid, PRIVATE)
+    assert.equal(normalizedPrivateUpsert.key.id, "private-original-id")
+
+    const mixedGroupUpsert = {
+        key: { remoteJid: GROUP, id: "mixed-edit-event", fromMe: false, participant: SENDER },
+        message: {
+            protocolMessage: {
+                type: 14,
+                key: { remoteJid: SENDER, id: "mixed-original-id", fromMe: false, participant: SENDER },
+                editedMessage: { conversation: "Mixed group edit" },
+            },
+        },
+    }
+    const normalizedMixedGroup = guardian.normalizeEditUpsertMessage(mixedGroupUpsert)
+    assert(normalizedMixedGroup, "group chat must survive mixed protocol PN key")
+    assert.equal(normalizedMixedGroup.key.remoteJid, GROUP, "group JID must win over participant PN")
 
     resetState()
     guardian.rememberOriginalMessage(originalMessage("array-edit", "Original array text"), { now: 1000 })
@@ -277,13 +333,36 @@ async function run() {
     assert.equal(result.result, "skipped", "whitespace-only edit must skip")
     assert.equal(counters.anti, 0)
 
+    resetState()
+    counters = { anti: 0, other: 0, logs: [] }
+    guardian.rememberOriginalMessage(originalMessage("private", "Private original", {
+        remoteJid: PRIVATE,
+        participant: PRIVATE,
+    }), { now: 1000, senderJid: PRIVATE })
     result = await guardian.handleMessageEditUpdate(
-        editUpdate("private", { conversation: "Private edit" }, { remoteJid: PRIVATE }),
+        materializedEditUpdate("private", { conversation: "Private edit" }, { remoteJid: PRIVATE }),
         makeContext({ counters })
     )
-    assert.equal(result.result, "private")
-    assert.equal(counters.anti, 0)
+    assert.equal(result.result, "skipped", "private edit must be logged without moderation")
+    assert.equal(result.logSent, true, "private edit must send security log")
+    assert.equal(counters.logs.length, 1, "private edit sends exactly one log")
+    assert(counters.logs[0].outbound.text.includes("Private original"), "private old text must be logged")
+    assert(counters.logs[0].outbound.text.includes("*Private edit*"), "private new text must be logged")
+    assert.equal(counters.anti, 0, "private edit must not run Anti Kasar")
 
+    resetState()
+    counters = { anti: 0, other: 0, logs: [] }
+    guardian.rememberOriginalMessage(originalMessage("direct-group", "Direct original"), { now: 1000 })
+    result = await guardian.handleMessageEditUpdate(
+        materializedEditUpdate("direct-group", { conversation: "Direct edited" }, { participant: SENDER }),
+        makeContext({ counters })
+    )
+    assert.equal(result.logSent, true, "materialized group edit must send log")
+    assert.equal(counters.logs.length, 1, "materialized group edit sends one log")
+    assert.equal(counters.anti, 1, "materialized group edit still checks Anti Kasar")
+
+    resetState()
+    counters = { anti: 0, other: 0, logs: [] }
     guardian.rememberOriginalMessage(originalMessage("from-me", "Initial", {
         fromMe: true,
         participant: "628999999999@s.whatsapp.net",
