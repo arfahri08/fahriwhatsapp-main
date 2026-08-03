@@ -31,6 +31,24 @@ function isChatJid(value) {
     return isGroupJid(value) || isPrivateJid(value)
 }
 
+function isStatusOrBroadcastJid(value) {
+    const jid = toNonADJid(value)
+    return jid === "status@broadcast"
+        || jid.endsWith("@broadcast")
+        || jid.endsWith("@newsletter")
+}
+
+function hasStatusOrBroadcastTransport(msg, envelope = msg?.message?.secretEncryptedMessage) {
+    const targetKey = envelope?.targetMessageKey || {}
+    const candidates = [
+        msg?.key?.remoteJid,
+        msg?.key?.remoteJidAlt,
+        targetKey.remoteJid,
+        targetKey.remoteJidAlt,
+    ]
+    return candidates.some(isStatusOrBroadcastJid)
+}
+
 function toBuffer(value) {
     if (!value) return null
     if (Buffer.isBuffer(value)) return Buffer.from(value)
@@ -51,6 +69,9 @@ function isMessageEditSecretType(value) {
 function getSecretEnvelope(msg) {
     const envelope = msg?.message?.secretEncryptedMessage
     if (!envelope || typeof envelope !== "object") return null
+    // Status broadcast/newsletter dapat membawa secretEncryptedMessage dengan
+    // bentuk yang mirip MESSAGE_EDIT. Itu adalah transport status, bukan edit chat.
+    if (hasStatusOrBroadcastTransport(msg, envelope)) return null
     if (!isMessageEditSecretType(envelope.secretEncType)) return null
     if (!envelope.targetMessageKey?.id) return null
     if (!toBuffer(envelope.encIv) || !toBuffer(envelope.encPayload)) return null
@@ -401,6 +422,8 @@ module.exports = {
     deriveMessageEditKey,
     decryptAesGcm,
     decryptSecretEncryptedEdit,
+    isStatusOrBroadcastJid,
+    hasStatusOrBroadcastTransport,
     toNonADJid,
     toBuffer,
 }

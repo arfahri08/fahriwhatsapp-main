@@ -699,7 +699,7 @@ async function sendInteractiveMenu(sock, groupJid, options = {}) {
     }
 
     await sock.sendMessage(groupJid, {
-        text: buildFallbackMenuText(options.bodyText),
+        text: String(options.fallbackText || buildFallbackMenuText(options.bodyText)),
         mentions: unique(options.mentionedJid),
     })
     return { sent: true, mode: "text-fallback" }

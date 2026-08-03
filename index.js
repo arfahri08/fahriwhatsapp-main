@@ -67,6 +67,7 @@ const antiToxicControl = require("./modules/antiToxicControl");
 const antiToxicReflectionConfig = require("./modules/antiToxicReflectionConfig");
 const groupRemoteControl = require("./modules/groupRemoteControl");
 const groupWelcome = require("./modules/groupWelcome");
+const privateHelloMenu = require("./modules/privateHelloMenu");
 const lidAliasStore = require("./modules/lidAliasStore");
 const extendedDownloader = require("./modules/extendedDownloader");
 const fakeVn = require("./modules/fakeVn");
@@ -3588,6 +3589,24 @@ async function startBot() {
             participantAlt: msg?.key?.participantAlt,
         })
 
+        const privateMenuCommandHandled = !isGroup && await routerTrace.run(msg, traceContext, "privateHelloMenuCommand", () => privateHelloMenu.handlePrivateMenuCommand(sock, msg, {
+            from,
+            text,
+            isGroup,
+        }))
+        if (privateMenuCommandHandled) return
+
+        if (!isGroup && !isMe && botStatus.getStatus() && privateHelloMenu.isHelloTrigger(text)) {
+            const privateHelloHandled = await routerTrace.run(msg, traceContext, "privateHelloMenu", () => privateHelloMenu.handlePrivateHello(sock, msg, {
+                from,
+                text,
+                isGroup,
+                displayName: msg?.pushName || contactNameStore.resolveContactName?.(senderJid, []) || "Kak",
+                baileys,
+            }))
+            if (privateHelloHandled) return
+        }
+
         const groupRemoteControlHandled = !isGroup && await routerTrace.run(msg, traceContext, "groupRemoteControl", () => groupRemoteControl.handleGroupRemoteControlCommand(sock, msg, {
             from,
             sender: senderJid,
@@ -4654,7 +4673,7 @@ if (targetPdfUser) {
             if (scheduledReply) { await sendAutoReplyWithForward({ text: scheduledReply }); return }
 
             const lowText = text.toLowerCase()
-            if (lowText && (lowText.includes("halo") || lowText.includes("assalamualaikum"))) { await sendAutoReplyWithForward({ text: "Halo, {name}! Ada yang bisa dibantu? Chat lagi aja ya, ini bot auto-reply." }); return }
+            if (lowText && lowText.includes("assalamualaikum")) { await sendAutoReplyWithForward({ text: "Waalaikumsalam, {name}! Ada yang bisa dibantu?" }); return }
             if (lowText && (lowText.includes("siapa") || lowText.includes("nama"))) { await sendAutoReplyWithForward({ text: "Hai {name}, aku USERBOT Fahri. Ada pesan penting yang mau dititipkan?" }); return }
             if (lowText && (lowText.includes("p") || lowText.includes("ping"))) { await sendAutoReplyWithForward({ text: "Pesanmu sudah diterima, {name} 👍" }); return }
             if (lowText && (lowText.includes("lagi apa") || lowText.includes("sibuk"))) { await sendAutoReplyWithForward({ text: "Hai {name}, USERBOT sedang standby 😄" }); return }

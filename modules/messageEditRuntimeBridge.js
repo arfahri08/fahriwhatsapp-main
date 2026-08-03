@@ -3,7 +3,7 @@ const fs = require("fs")
 const path = require("path")
 const secretEncryptedEdit = require("./secretEncryptedEdit")
 
-const BUILD = "EDIT-SECRET-2026-07-29.1"
+const BUILD = "EDIT-SECRET-2026-08-03.2"
 const TRACE_PATH = path.resolve(
     process.env.EDIT_TAP_TRACE_PATH
     || path.join(__dirname, "../data/editEventTrace.jsonl")
@@ -33,6 +33,19 @@ function isPrivateJid(value) {
 
 function isChatJid(value) {
     return isGroupJid(value) || isPrivateJid(value)
+}
+
+function isStatusOrBroadcastJid(value) {
+    return secretEncryptedEdit.isStatusOrBroadcastJid(value)
+}
+
+function rawUpdateUsesStatusTransport(rawUpdate, normalized = null) {
+    const keys = [
+        rawUpdate?.key,
+        rawUpdate?.update?.key,
+        normalized?.key,
+    ].filter(Boolean)
+    return keys.some(key => [key.remoteJid, key.remoteJidAlt].some(isStatusOrBroadcastJid))
 }
 
 function getContext() {
@@ -195,6 +208,11 @@ async function processNormalizedEdit(normalized, rawUpdate, source) {
 
     const chatJid = normalizeJid(normalized.key?.remoteJid || normalized.key?.remoteJidAlt)
     const messageId = String(normalized.key?.id || "").trim()
+    if (rawUpdateUsesStatusTransport(rawUpdate, normalized) || isStatusOrBroadcastJid(chatJid)) {
+        console.log(`[EDIT TAP] SKIP status/broadcast source=${source} id=${messageId || "-"}`)
+        appendTrace("skip-status-broadcast", { source, messageId, key: normalized?.key, rawUpdate })
+        return { result: "status-broadcast" }
+    }
     const editedText = String(normalized.editedText || "").trim()
     if (!isChatJid(chatJid) || !messageId || !editedText) {
         console.log(`[EDIT TAP] INVALID source=${source} chat=${chatJid || "-"} id=${messageId || "-"}`)
@@ -327,6 +345,14 @@ function handleMessagesUpsertEvent(upsert) {
     const editCandidates = []
 
     for (const msg of messages) {
+        if (secretEncryptedEdit.hasStatusOrBroadcastTransport(msg)) {
+            appendTrace("skip-status-broadcast", {
+                source: "messages.upsert",
+                key: msg?.key,
+                messageKeys: safeKeys(msg?.message),
+            })
+            continue
+        }
         if (secretEncryptedEdit.isSecretEncryptedEditMessage(msg)) {
             const envelope = secretEncryptedEdit.getSecretEnvelope(msg)
             console.log(`[EDIT SECRET] RAW messages.upsert chat=${msg?.key?.remoteJid || msg?.key?.remoteJidAlt || "-"} shellId=${msg?.key?.id || "-"} targetId=${envelope?.targetMessageKey?.id || "-"}`)
