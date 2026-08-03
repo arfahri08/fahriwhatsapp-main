@@ -4,7 +4,8 @@ const groupWelcome = require("./groupWelcome")
 const help = require("./help")
 
 const WEBSITE_URL = "https://antoniusfahri.my.id"
-const HELLO_BUILD = "PRIVATE-HELLO-MENU-2026-08-03.2"
+const HELLO_BUILD = "PRIVATE-HELLO-MENU-2026-08-03.3"
+const WEBSITE_BUTTON_TEXT = "Tentang Penulis Script Bot"
 const HELLO_DEDUPE_TTL_MS = 5 * 60 * 1000
 const recentHelloMessages = new Map()
 
@@ -42,10 +43,7 @@ function buildIntroText(name = "Kak") {
         "",
         "Aku adalah *USERBOT FAHRI*, bot WhatsApp pribadi yang membantu otomasi chat, media tools, downloader, reminder, dan fitur keamanan.",
         "",
-        `🌐 *${WEBSITE_URL}*`,
-        "_(Tentang penulis script bot)_",
-        "",
-        "Tekan tombol di bawah untuk membuka menu bantuan.",
+        `Tekan tombol *${WEBSITE_BUTTON_TEXT}* untuk membuka website penulis, atau tekan *BUKA MENU* untuk melihat seluruh bantuan bot.`,
     ].join("\n")
 }
 
@@ -55,7 +53,6 @@ function buildPrivateMenuSections() {
             title: "BANTUAN UTAMA",
             rows: [
                 { header: "HELP", title: "Semua Command", description: "Buka helper text lengkap bot", id: ".pmenu all" },
-                { header: "ABOUT", title: "Tentang Bot", description: "Website dan informasi penulis script", id: ".pmenu about" },
             ],
         },
         {
@@ -99,8 +96,7 @@ function buildCategoryText(category) {
             "",
             "USERBOT FAHRI dikembangkan sebagai proyek otomasi WhatsApp pribadi untuk membantu pengelolaan chat, media, reminder, downloader, dan keamanan.",
             "",
-            `🌐 ${WEBSITE_URL}`,
-            "_(Tentang penulis script bot)_",
+            `Buka tombol *${WEBSITE_BUTTON_TEXT}* pada menu utama untuk mengunjungi website penulis script.`,
         ].join("\n")
     }
     if (value === "downloader") {
@@ -262,6 +258,17 @@ async function handlePrivateHello(sock, msg, context = {}) {
             bodyText: buildIntroText(displayName),
             footer: "Pilih kategori bantuan • USERBOT FAHRI",
             sections: buildPrivateMenuSections(),
+            nativeFlowButtons: [
+                {
+                    name: "cta_url",
+                    buttonParamsJson: JSON.stringify({
+                        display_text: WEBSITE_BUTTON_TEXT,
+                        url: WEBSITE_URL,
+                        merchant_url: WEBSITE_URL,
+                    }),
+                },
+            ],
+            menuButtonTitle: "BUKA MENU",
             quoted: msg,
             fallbackText: buildPrivateFallbackText(displayName),
             baileys: context.baileys,
@@ -305,6 +312,7 @@ function clearHelloDedupe() {
 
 module.exports = {
     WEBSITE_URL,
+    WEBSITE_BUTTON_TEXT,
     HELLO_BUILD,
     isHelloTrigger,
     buildIntroText,

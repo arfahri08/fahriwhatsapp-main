@@ -578,6 +578,33 @@ function createHarukaStyleInteractiveMessage(baileys, options = {}) {
     const footer = String(options.footer || "Pilih kategori dan jalankan command tanpa mengetik manual")
     const mentionedJid = unique(options.mentionedJid)
     const sections = options.sections || buildMenuSections()
+    const menuButtonTitle = String(options.menuButtonTitle || "BUKA MENU")
+    const nativeButtonFactory = proto.Message.InteractiveMessage.NativeFlowMessage.NativeFlowButton
+    const createNativeButton = definition => {
+        const buttonParamsJson = typeof definition?.buttonParamsJson === "string"
+            ? definition.buttonParamsJson
+            : JSON.stringify(definition?.buttonParamsJson || {})
+        const payload = {
+            name: String(definition?.name || "").trim(),
+            buttonParamsJson,
+        }
+        return nativeButtonFactory?.create ? nativeButtonFactory.create(payload) : payload
+    }
+    const extraButtons = (Array.isArray(options.nativeFlowButtons) ? options.nativeFlowButtons : [])
+        .filter(button => button && String(button.name || "").trim())
+        .map(createNativeButton)
+    const menuButtonParams = {
+        title: "BUKA MENU",
+        sections,
+    }
+    if (options.menuButtonTitle) menuButtonParams.title = menuButtonTitle
+    const buttons = [
+        ...extraButtons,
+        createNativeButton({
+            name: "single_select",
+            buttonParamsJson: menuButtonParams,
+        }),
+    ]
 
     return proto.Message.InteractiveMessage.create({
         contextInfo: mentionedJid.length ? { mentionedJid } : undefined,
@@ -589,28 +616,12 @@ function createHarukaStyleInteractiveMessage(baileys, options = {}) {
             hasMediaAttachment: false,
         }),
         nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
-            buttons: [
-                proto.Message.InteractiveMessage.NativeFlowMessage.NativeFlowButton?.create
-                    ? proto.Message.InteractiveMessage.NativeFlowMessage.NativeFlowButton.create({
-                        name: "single_select",
-                        buttonParamsJson: JSON.stringify({
-                            title: "BUKA MENU",
-                            sections,
-                        }),
-                    })
-                    : {
-                        name: "single_select",
-                        buttonParamsJson: JSON.stringify({
-                            title: "BUKA MENU",
-                            sections,
-                        }),
-                    },
-            ],
+            buttons,
             messageParamsJson: JSON.stringify({
                 bottom_sheet: {
-                    in_thread_buttons_limit: 1,
-                    list_title: "MENU GRUP",
-                    button_title: "BUKA MENU",
+                    in_thread_buttons_limit: Math.max(1, Math.min(buttons.length, 3)),
+                    list_title: String(options.menuListTitle || "MENU GRUP"),
+                    button_title: menuButtonTitle,
                 },
             }),
             messageVersion: 1,
