@@ -114,23 +114,39 @@ async function main() {
         async sendMessage(jid, content) { sent.push({ jid, content }); return { key: { id: "FALLBACK" } } },
     }
     const helloMsg = {
-        key: { remoteJid: "6285111111111@s.whatsapp.net", id: "HELLO-1", fromMe: false },
+        key: {
+            remoteJid: "17756082725042@lid",
+            remoteJidAlt: "6285168898178@s.whatsapp.net",
+            id: "HELLO-1",
+            fromMe: false,
+        },
         pushName: "Ur Heart",
         message: { conversation: "halo" },
     }
     assert.strictEqual(privateHelloMenu.isHelloTrigger("halo"), true)
     assert.strictEqual(privateHelloMenu.isHelloTrigger("HALO!!!"), true)
     assert.strictEqual(privateHelloMenu.isHelloTrigger("halo kak"), false)
+    const resolvedReplyJid = privateHelloMenu.resolvePrivateReplyJid(helloMsg, {
+        from: helloMsg.key.remoteJid,
+        senderJid: helloMsg.key.remoteJidAlt,
+    })
+    assert.strictEqual(resolvedReplyJid, "6285168898178@s.whatsapp.net", "LID wajib diarahkan ke PN JID")
+
     const handled = await privateHelloMenu.handlePrivateHello(helloSock, helloMsg, {
         from: helloMsg.key.remoteJid,
+        replyJid: resolvedReplyJid,
+        senderJid: helloMsg.key.remoteJidAlt,
         text: "halo",
         isGroup: false,
+        botStatus: false,
         displayName: "Ur Heart",
         baileys: makeFakeBaileys(captured),
     })
-    assert.strictEqual(handled, true)
+    assert.strictEqual(handled, true, "halo tetap bekerja walau botStatus false")
     assert.strictEqual(captured.length, 1)
+    assert.strictEqual(captured[0].jid, "6285168898178@s.whatsapp.net")
     assert.strictEqual(relay.length, 1)
+    assert.strictEqual(relay[0][0], "6285168898178@s.whatsapp.net")
     const interactive = captured[0].content.viewOnceMessage.message.interactiveMessage
     assert.strictEqual(interactive.header.title, "✦ MENU PRIVATE • USERBOT FAHRI ✦")
     assert.match(interactive.body.text, /antoniusfahri\.my\.id/)
@@ -149,6 +165,9 @@ async function main() {
     assert.ok(source.includes('const privateHelloMenu = require("./modules/privateHelloMenu")'))
     assert.ok(source.includes('privateHelloMenu.handlePrivateHello'))
     assert.ok(source.includes('privateHelloMenu.handlePrivateMenuCommand'))
+    assert.ok(source.includes('[PRIVATE HELLO ROUTE]'))
+    assert.ok(source.includes('privateHelloMenu.resolvePrivateReplyJid'))
+    assert.ok(!source.includes('botStatus.getStatus() && privateHelloMenu.isHelloTrigger'), "halo tidak boleh digate status global bot")
 
     bridge.disposeMessageEditRuntimeBridge()
     guardian.disposeMessageEditGuardian()

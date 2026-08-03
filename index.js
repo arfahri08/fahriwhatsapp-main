@@ -3589,18 +3589,40 @@ async function startBot() {
             participantAlt: msg?.key?.participantAlt,
         })
 
+        const privateReplyJid = !isGroup
+            ? privateHelloMenu.resolvePrivateReplyJid(msg, {
+                from,
+                senderJid,
+                resolvedFrom: lidAliasStore.resolveBestJid(from),
+                resolvedSender: lidAliasStore.resolveBestJid(senderJid),
+            })
+            : from
+
         const privateMenuCommandHandled = !isGroup && await routerTrace.run(msg, traceContext, "privateHelloMenuCommand", () => privateHelloMenu.handlePrivateMenuCommand(sock, msg, {
             from,
+            replyJid: privateReplyJid,
+            senderJid,
             text,
             isGroup,
         }))
         if (privateMenuCommandHandled) return
 
-        if (!isGroup && !isMe && botStatus.getStatus() && privateHelloMenu.isHelloTrigger(text)) {
+        if (!isGroup && !isMe && privateHelloMenu.isHelloTrigger(text)) {
+            console.log("[PRIVATE HELLO ROUTE]", {
+                build: privateHelloMenu.HELLO_BUILD,
+                id: msg?.key?.id,
+                from,
+                senderJid,
+                replyJid: privateReplyJid,
+                botStatus: botStatus.getStatus(),
+            })
             const privateHelloHandled = await routerTrace.run(msg, traceContext, "privateHelloMenu", () => privateHelloMenu.handlePrivateHello(sock, msg, {
                 from,
+                replyJid: privateReplyJid,
+                senderJid,
                 text,
                 isGroup,
+                botStatus: botStatus.getStatus(),
                 displayName: msg?.pushName || contactNameStore.resolveContactName?.(senderJid, []) || "Kak",
                 baileys,
             }))
