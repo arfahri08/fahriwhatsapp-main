@@ -149,6 +149,8 @@ async function main() {
     assert.strictEqual(relay[0][0], "6285168898178@s.whatsapp.net")
     const interactive = captured[0].content.viewOnceMessage.message.interactiveMessage
     assert.strictEqual(interactive.header.title, "✦ MENU PRIVATE • USERBOT FAHRI ✦")
+    assert.ok(interactive.body.text.startsWith("\n👋 Halo, *Ur*!"), "harus ada satu baris kosong antara judul dan sapaan halo")
+    assert.ok(!interactive.body.text.startsWith("\n\n"), "jarak judul dan halo cukup satu baris kosong")
     assert.doesNotMatch(interactive.body.text, /antoniusfahri\.my\.id/, "URL website tidak boleh ditulis di body")
     assert.match(interactive.body.text, /Tentang Penulis Script Bot/)
     const websiteButton = interactive.nativeFlowMessage.buttons.find(button => button.name === "cta_url")

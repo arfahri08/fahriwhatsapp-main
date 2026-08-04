@@ -4,7 +4,7 @@ const groupWelcome = require("./groupWelcome")
 const help = require("./help")
 
 const WEBSITE_URL = "https://antoniusfahri.my.id"
-const HELLO_BUILD = "PRIVATE-HELLO-MENU-2026-08-03.3"
+const HELLO_BUILD = "PRIVATE-HELLO-MENU-2026-08-04.1"
 const WEBSITE_BUTTON_TEXT = "Tentang Penulis Script Bot"
 const HELLO_DEDUPE_TTL_MS = 5 * 60 * 1000
 const recentHelloMessages = new Map()
@@ -255,7 +255,7 @@ async function handlePrivateHello(sock, msg, context = {}) {
     try {
         const result = await groupWelcome.sendInteractiveMenu(sock, targetJid, {
             title: "✦ MENU PRIVATE • USERBOT FAHRI ✦",
-            bodyText: buildIntroText(displayName),
+            bodyText: `\n${buildIntroText(displayName)}`,
             footer: "Pilih kategori bantuan • USERBOT FAHRI",
             sections: buildPrivateMenuSections(),
             nativeFlowButtons: [
