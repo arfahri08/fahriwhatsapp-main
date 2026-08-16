@@ -66,7 +66,24 @@ const antiToxicStickerOcr = require("./modules/antiToxicStickerOcr");
 const antiToxicControl = require("./modules/antiToxicControl");
 const antiToxicReflectionConfig = require("./modules/antiToxicReflectionConfig");
 const groupRemoteControl = require("./modules/groupRemoteControl");
+const groupRuntimePolicy = require("./modules/groupRuntimePolicy");
 const groupWelcome = require("./modules/groupWelcome");
+const groupUtilityCommands = require("./modules/groupUtilityCommands");
+const groupScheduleManager = require("./modules/groupScheduleManager");
+const groupModerationTools = require("./modules/groupModerationTools");
+const groupAttendance = require("./modules/groupAttendance");
+const groupFloodGuard = require("./modules/groupFloodGuard");
+const controlledBroadcast = require("./modules/controlledBroadcast");
+const contactServices = require("./modules/contactServices");
+const contactPushManager = require("./modules/contactPushManager");
+const commerceCommands = require("./modules/commerceCommands");
+const jadibotManager = require("./modules/jadibotManager");
+const statusAutomation = require("./modules/statusAutomation");
+const whatsappInspect = require("./modules/whatsappInspect");
+const webToZip = require("./modules/webToZip");
+const safeMockup = require("./modules/safeMockup");
+const imageNsfwModeration = require("./modules/imageNsfwModeration");
+const waSecurityResearchLab = require("./modules/waSecurityResearchLab");
 const privateHelloMenu = require("./modules/privateHelloMenu");
 const lidAliasStore = require("./modules/lidAliasStore");
 const extendedDownloader = require("./modules/extendedDownloader");
@@ -88,6 +105,9 @@ const messageEditGuardian = require("./modules/messageEditGuardian");
 const messageEditRuntimeBridge = require("./modules/messageEditRuntimeBridge");
 const loginManager = require("./modules/login");
 const backup = require("./modules/backup");
+
+// Persisted blast jobs never resume implicitly after process startup.
+controlledBroadcast.markRestartPaused()
 
 // ===== ADVANCED FEATURE CONFIG =====
 const PRIORITY_USERS = ["6288287764273@s.whatsapp.net"] // isi nomor penting
@@ -123,6 +143,7 @@ const MESSAGE_CONTENT_CACHE_MAX_SIZE = 1000
 const GROUP_METADATA_CACHE_TTL_MS = Number(process.env.GROUP_METADATA_CACHE_TTL_MS || 60 * 60 * 1000)
 const GROUP_METADATA_STALE_TTL_MS = Number(process.env.GROUP_METADATA_STALE_TTL_MS || 6 * 60 * 60 * 1000)
 const GROUP_METADATA_CACHE_MAX_SIZE = Number(process.env.GROUP_METADATA_CACHE_MAX_SIZE || 500)
+const GROUP_ADMIN_POLICY_CACHE_TTL_MS = Math.max(5_000, Number(process.env.GROUP_ADMIN_POLICY_CACHE_TTL_MS || 60_000))
 const groupMetadataCache = new Map()
 const RESTART_NOTICE_PATH = path.join(__dirname, "data", "restartNotice.json")
 const INSTANCE_LOCK_PATH = path.join(__dirname, "data", "runtime.lock")
@@ -1975,6 +1996,20 @@ function installGroupMetadataCache(sock) {
     if (!sock || sock.__groupMetadataCacheInstalled || typeof sock.groupMetadata !== "function") return
 
     const originalGroupMetadata = sock.groupMetadata.bind(sock)
+    sock.__resolveGroupMetadataForRuntimePolicy = async function resolvePolicyGroupMetadata(jid, options = {}) {
+        const normalizedJid = String(jid || "").trim()
+        if (!isGroupJid(normalizedJid)) return originalGroupMetadata(jid)
+
+        const cached = options.forceRefresh === true
+            ? null
+            : getCachedGroupMetadata(normalizedJid, GROUP_ADMIN_POLICY_CACHE_TTL_MS)
+        if (cached) return cached
+
+        // Authorization must never use the long stale fallback. If the direct
+        // refresh fails, callers fail closed instead of trusting an old admin state.
+        const metadata = await originalGroupMetadata(normalizedJid)
+        return rememberGroupMetadata(normalizedJid, metadata)
+    }
     sock.groupMetadata = async function cachedGroupMetadata(jid) {
         const normalizedJid = String(jid || "").trim()
         if (!isGroupJid(normalizedJid)) return originalGroupMetadata(jid)
@@ -2324,10 +2359,60 @@ async function sendPrivateMessageWithLidFallback(sock, originalSendMessage, orig
     }
 }
 
+function makeSilentGroupOutputResult(jid, policy) {
+    return {
+        key: { remoteJid: jid, id: "", fromMe: true },
+        __groupOutputSkipped: true,
+        reason: policy?.reason || "group-runtime-denied",
+    }
+}
+
+async function authorizeGroupOutput(sock, jid) {
+    if (securityMediaLog.isSecurityLogChat(jid)) {
+        return { allowed: true, reason: "security-log-exempt", groupJid: jid }
+    }
+    return groupRuntimePolicy.resolveGroupRuntimePolicy(sock, jid, {
+        groupRemoteControl,
+    })
+}
+
 async function sendGroupMessageSafely(sock, originalSendMessage, jid, content, options = {}) {
+    const policy = await authorizeGroupOutput(sock, jid)
+    if (!policy.allowed) {
+        console.log("[GROUP OUTPUT GATE] sendMessage dibuat silent", {
+            groupJid: jid,
+            reason: policy.reason,
+            contentType: Object.keys(content || {})[0] || "unknown",
+        })
+        return makeSilentGroupOutputResult(jid, policy)
+    }
     // Mode grup dibuat seperti PrimonProto: serahkan proses group relay,
     // quoted, sender-key, retry, dan metadata ke Baileys bawaan.
     return sendMessageWithSessionRepair(sock, originalSendMessage, jid, content, options)
+}
+
+function wrapRelayMessageForGroups(sock) {
+    if (!sock || sock.__relayMessageGroupsWrapped || typeof sock.relayMessage !== "function") return
+
+    const originalRelayMessage = sock.relayMessage.bind(sock)
+    sock.relayMessage = async function wrappedRelayMessage(jid, message, options = {}) {
+        const targetJid = String(jid || "").trim()
+        if (isGroupJid(targetJid)) {
+            const policy = await authorizeGroupOutput(sock, targetJid)
+            if (!policy.allowed) {
+                console.log("[GROUP OUTPUT GATE] relayMessage dibuat silent", {
+                    groupJid: targetJid,
+                    reason: policy.reason,
+                    messageType: Object.keys(message || {})[0] || "unknown",
+                })
+                return makeSilentGroupOutputResult(targetJid, policy)
+            }
+        }
+        return originalRelayMessage(jid, message, options)
+    }
+
+    sock.__relayMessageGroupsWrapped = true
+    console.log("[GROUP OUTPUT GATE] relayMessage grup memakai hard admin gate")
 }
 
 function wrapSendMessageForGroups(sock) {
@@ -2442,6 +2527,21 @@ function clearFollowUpFor(jid) {
 
 function cleanupSocket(sock) {
     stopBroadcastScheduler()
+    try {
+        controlledBroadcast.dispose()
+    } catch {}
+    try {
+        contactPushManager.dispose()
+    } catch {}
+    try {
+        jadibotManager.defaultManager.dispose()
+    } catch {}
+    try {
+        statusAutomation.resetRuntimeQueue()
+    } catch {}
+    try {
+        groupScheduleManager.disposeGroupScheduleManager(sock)
+    } catch {}
     try {
         reactionWorkflow.disposeReactionWorkflow(sock)
     } catch {}
@@ -2857,11 +2957,19 @@ async function startBot() {
     activeSock = sock
     global.sock = sock
     installGroupMetadataCache(sock)
+    // Install the defensive research guard before later wrappers so every
+    // sendMessage/relayMessage path remains covered, including group routing.
+    waSecurityResearchLab.installOutboundSafetyGuard(sock)
     wrapSendMessageForGroups(sock)
+    wrapRelayMessageForGroups(sock)
     wrapSendMessageTracker(sock)
     installGroupMetadataCacheInvalidation(sock)
     groupWelcome.installGroupWelcome(sock, {
         groupRemoteControl,
+    })
+    groupScheduleManager.installGroupScheduleManager(sock, {
+        groupRemoteControl,
+        lidAliasStore,
     })
     installPhoneNumberAliasTracker(sock)
     reactionWorkflow.installReactionWorkflow(sock, {
@@ -3330,6 +3438,9 @@ async function startBot() {
 
             statusDownloader.rememberStatus(item)
             await statusInbox.rememberIncomingStatus(sock, item, { lidAliasStore })
+            void statusAutomation.handleIncomingStatus(sock, item, { lidAliasStore }).catch(error => {
+                console.log(`[STATUS AUTOREACT] Gagal memproses status: ${String(error?.message || error).slice(0, 180)}`)
+            })
         }
 
         // Fast lane view-once: buka dan cache dulu sebelum module lain mencoba
@@ -3458,27 +3569,9 @@ async function startBot() {
             })
         }
 
+        let inboundGroupPolicy = null
         if (isGroup) {
             traceGroupAutoReplySkips()
-            const groupBotEnabled = groupRemoteControl.isGroupBotEnabled(from)
-
-            if (!groupBotEnabled) {
-                routerTrace.trace(msg, {
-                    ...traceContext,
-                    policy: "disabled",
-                    handler: "groupRouter",
-                    skipped: true,
-                    reason: "bot-disabled",
-                })
-                debugAntiToxicPipeline("skip-by-group-bot-disabled", {
-                    id: msg?.key?.id,
-                    from,
-                    senderJid,
-                    reason: "bot-disabled",
-                })
-                return
-            }
-
             // Pelajari LID akun userbot dari pesan fromMe agar pengecekan admin
             // tetap akurat pada grup yang metadata-nya hanya mengembalikan @lid.
             // Ini penting untuk command yang dikirim dari akun userbot sendiri.
@@ -3488,41 +3581,82 @@ async function startBot() {
             // an admin (or metadata cannot be read), commands and moderation
             // engines stay completely silent in that group. Security log event
             // handlers remain separate and are not changed by this gate.
-            let inboundGroupMetadata = null
-            try {
-                inboundGroupMetadata = await sock.groupMetadata(from)
-            } catch (error) {
-                routerTrace.trace(msg, {
-                    ...traceContext,
-                    policy: "adminRequired",
-                    handler: "groupAdminGate",
-                    skipped: true,
-                    reason: "metadata-unavailable",
-                })
-                console.log("[GROUP ADMIN GATE] Skip seluruh fitur grup karena metadata tidak tersedia", {
-                    groupJid: from,
-                    error: String(error?.message || error).slice(0, 240),
-                })
-                return
-            }
-
             const selfIdentityCandidates = msg?.key?.fromMe
                 ? [msg?.key?.participant, msg?.key?.participantAlt, msg?.participant, msg?.participantAlt]
                 : []
-            if (!groupWelcome.isBotAdmin(inboundGroupMetadata, sock, selfIdentityCandidates)) {
+            inboundGroupPolicy = await groupRuntimePolicy.resolveGroupRuntimePolicy(sock, from, {
+                groupRemoteControl,
+                extraIdentityCandidates: selfIdentityCandidates,
+            })
+            if (!inboundGroupPolicy.allowed) {
                 routerTrace.trace(msg, {
                     ...traceContext,
                     policy: "adminRequired",
                     handler: "groupAdminGate",
                     skipped: true,
-                    reason: "bot-not-admin",
+                    reason: inboundGroupPolicy.reason,
                 })
-                console.log("[GROUP ADMIN GATE] Skip seluruh fitur grup karena bot bukan admin", {
+                debugAntiToxicPipeline("skip-by-group-runtime-policy", {
+                    id: msg?.key?.id,
+                    from,
+                    senderJid,
+                    reason: inboundGroupPolicy.reason,
+                })
+                console.log("[GROUP ADMIN GATE] Skip seluruh fitur grup", {
                     groupJid: from,
                     senderJid,
+                    reason: inboundGroupPolicy.reason,
+                    botAdmin: inboundGroupPolicy.botAdmin,
+                    groupBotConfig: inboundGroupPolicy.botConfig,
                 })
                 return
             }
+        }
+
+        if (isGroup) {
+            const groupFeatureContext = {
+                from,
+                text,
+                sender: senderJid,
+                senderJid,
+                isGroup,
+                isOwner,
+                canControlOwner,
+                ownerJid: getOwnerControlJid(),
+                isOwnerJid,
+                groupRemoteControl,
+                lidAliasStore,
+                runtimePolicy: inboundGroupPolicy,
+                baileys,
+                isBotGeneratedMessage,
+            }
+            const floodBlocked = await routerTrace.run(msg, traceContext, "groupFloodGuard", () => (
+                groupFloodGuard.handleIncomingGroupMessage(sock, msg, groupFeatureContext)
+            ))
+            if (floodBlocked) return
+
+            const groupHandlers = [
+                ["groupUtilityCommands", groupUtilityCommands.handleGroupUtilityCommand],
+                ["groupScheduleManager", groupScheduleManager.handleGroupScheduleCommand],
+                ["groupModerationTools", groupModerationTools.handleGroupModerationCommand],
+                ["groupAttendance", groupAttendance.handleGroupAttendanceCommand],
+                ["groupFloodCommands", groupFloodGuard.handleGroupFloodCommand],
+                ["contactExportVcf", contactServices.handleExportVcf],
+                ["imageNsfwCommand", imageNsfwModeration.handleNsfwCommand],
+                ["commerce", commerceCommands.handleCommerceCommand],
+                ["whatsappInspect", whatsappInspect.handleInspectCommand],
+                ["safeMockup", safeMockup.handleSafeMockup],
+            ]
+            for (const [handlerName, handler] of groupHandlers) {
+                const handled = await routerTrace.run(msg, traceContext, handlerName, () => handler(sock, msg, groupFeatureContext))
+                if (handled) return
+            }
+
+            // Image inference is serialized and intentionally runs in background;
+            // it never bypasses the hard group runtime policy resolved above.
+            void imageNsfwModeration.moderateImage(sock, msg, groupFeatureContext).catch(error => {
+                console.log(`[IMAGE NSFW] Moderation gagal: ${String(error?.message || error).slice(0, 180)}`)
+            })
         }
 
         if (!isGroup && securityMediaLog.isSecurityLogCommand(text)) {
@@ -3597,6 +3731,35 @@ async function startBot() {
                 resolvedSender: lidAliasStore.resolveBestJid(senderJid),
             })
             : from
+
+        // Status has already been cached and offered to status autoreact in the
+        // fast lane. Never let an owner's own story become wizard input.
+        if (from === "status@broadcast" || String(from || "").endsWith("@broadcast") || String(from || "").endsWith("@newsletter")) return
+
+        const serviceContext = {
+            from,
+            replyJid: privateReplyJid,
+            text,
+            sender: senderJid,
+            senderJid,
+            isGroup,
+            isOwner: canControlOwner,
+            canControlOwner,
+            ownerJid: getOwnerControlJid(),
+            isOwnerJid,
+            groupRemoteControl,
+            lidAliasStore,
+            contactNameStore,
+            baileys,
+            isBotGeneratedMessage,
+        }
+
+        // Wizard handlers must see non-command continuation messages before the
+        // generic private menu/downloader/auto-reply paths.
+        const controlledBroadcastHandled = await routerTrace.run(msg, traceContext, "controlledBroadcast", () => controlledBroadcast.handleControlledBroadcast(sock, msg, serviceContext))
+        if (controlledBroadcastHandled) return
+        const contactPushHandled = await routerTrace.run(msg, traceContext, "contactPush", () => contactPushManager.handleContactPush(sock, msg, serviceContext))
+        if (contactPushHandled) return
 
         const privateMenuCommandHandled = !isGroup && await routerTrace.run(msg, traceContext, "privateHelloMenuCommand", () => privateHelloMenu.handlePrivateMenuCommand(sock, msg, {
             from,
@@ -3924,6 +4087,21 @@ async function startBot() {
                     reason: "private-only",
                 })
             }
+        }
+
+        const serviceHandlers = [
+            ["commerce", commerceCommands.handleCommerceCommand],
+            ["jadibot", jadibotManager.handleJadibotCommand],
+            ["statusAutomation", statusAutomation.handleStatusAutomationCommand],
+            ["whatsappInspect", whatsappInspect.handleInspectCommand],
+            ["webToZip", webToZip.handleWebToZip],
+            ["safeMockup", safeMockup.handleSafeMockup],
+            ["imageNsfwCommand", imageNsfwModeration.handleNsfwCommand],
+            ["waSecurityResearchLab", waSecurityResearchLab.handleResearchLabCommand],
+        ]
+        for (const [handlerName, handler] of serviceHandlers) {
+            const handled = await routerTrace.run(msg, traceContext, handlerName, () => handler(sock, msg, serviceContext))
+            if (handled) return
         }
 
         // Legacy antiNsfwSticker routing dinonaktifkan agar stiker tidak diproses dua kali.
