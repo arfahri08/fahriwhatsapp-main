@@ -10,10 +10,10 @@
 
 <br />
 
-<a href="https://github.com/arfahri08/fahriwhatsapp-main/stargazers"><img src="https://img.shields.io/github/stars/arfahri08/fahriwhatsapp-main?style=for-the-badge&logo=github&label=Stars&color=gold" alt="GitHub stars" /></a>
-<a href="https://github.com/arfahri08/fahriwhatsapp-main/network/members"><img src="https://img.shields.io/github/forks/arfahri08/fahriwhatsapp-main?style=for-the-badge&logo=github&label=Forks&color=blue" alt="GitHub forks" /></a>
-<a href="https://github.com/arfahri08/fahriwhatsapp-main/issues"><img src="https://img.shields.io/github/issues/arfahri08/fahriwhatsapp-main?style=for-the-badge&logo=github&label=Issues&color=orange" alt="GitHub issues" /></a>
-<a href="https://github.com/arfahri08/fahriwhatsapp-main/watchers"><img src="https://img.shields.io/github/watchers/arfahri08/fahriwhatsapp-main?style=for-the-badge&logo=github&label=Watchers&color=brightgreen" alt="GitHub watchers" /></a>
+<a href="https://github.com/arfahri08/fahriwhatsapp-main/stargazers"><img src="https://img.shields.io/github/stars/arfahri08/fahriwhatsapp-main?style=for-the-badge&logo=github&label=Stars&color=gold&cacheSeconds=300" alt="GitHub stars" /></a>
+<a href="https://github.com/arfahri08/fahriwhatsapp-main/network/members"><img src="https://img.shields.io/github/forks/arfahri08/fahriwhatsapp-main?style=for-the-badge&logo=github&label=Forks&color=blue&cacheSeconds=300" alt="GitHub forks" /></a>
+<a href="https://github.com/arfahri08/fahriwhatsapp-main/issues"><img src="https://img.shields.io/github/issues/arfahri08/fahriwhatsapp-main?style=for-the-badge&logo=github&label=Issues&color=orange&cacheSeconds=300" alt="GitHub issues" /></a>
+<a href="https://github.com/arfahri08/fahriwhatsapp-main/watchers"><img src="https://img.shields.io/github/watchers/arfahri08/fahriwhatsapp-main?style=for-the-badge&logo=github&label=Watchers&color=brightgreen&cacheSeconds=300" alt="GitHub watchers" /></a>
 
 ![Node.js](https://img.shields.io/badge/Node.js-20%2B-339933?style=flat-square&logo=node.js&logoColor=white)
 ![Baileys](https://img.shields.io/badge/WhatsApp-Baileys%207-25D366?style=flat-square&logo=whatsapp&logoColor=white)
