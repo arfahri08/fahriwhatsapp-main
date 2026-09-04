@@ -713,6 +713,7 @@ function getSession(call) {
     if (call.durationSeconds !== undefined && call.durationSeconds !== null) {
         session.durationSeconds = call.durationSeconds;
     }
+    if (call.offline === true) session.offline = true;
     session.lastCall = { ...call };
 
     session.updatedAt = now;
@@ -1049,6 +1050,13 @@ function processCallUpdate(sock, inputCall, options) {
     if (status === "miss" || status === "reject") session.confirmedMissed = true;
 
     if (status === "terminate" && session.confirmedMissed !== true) {
+        if (call.offline === true || session.offline === true) {
+            // Saat reconnect, terminate dapat berasal dari panggilan lama yang
+            // sudah dijawab ketika bot offline. Tunggu call-log agar tidak
+            // salah mengirim voice note kepada panggilan yang terjawab.
+            console.log(`[CALL] callId ${id} terminate offline ambigu; menunggu call-log sebelum auto-reply.`);
+            return;
+        }
         console.log(`[CALL] callId ${id} terminate ambigu; menunggu ${TERMINATE_GRACE_MS} ms untuk bukti answered/call-log.`);
         scheduleAmbiguousTerminateReply(sock, call, session, options);
         return;

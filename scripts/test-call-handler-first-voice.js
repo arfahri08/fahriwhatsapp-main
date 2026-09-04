@@ -145,11 +145,25 @@ async function run() {
     await wait();
     assert.strictEqual(callerMessages(sock).length, 2, "preaccept adalah bukti call mulai diangkat dan tidak boleh dibalas");
 
+    sock.ev.emit("call", [{ id: "OFFLINE-ANSWERED", from: CALLER, status: "offer", offline: true }]);
+    sock.ev.emit("call", [{ id: "OFFLINE-ANSWERED", from: CALLER, status: "terminate", offline: true }]);
+    await wait(330);
+    assert.strictEqual(callerMessages(sock).length, 2, "terminate offline tanpa call-log tidak boleh membalas call yang mungkin sudah diangkat");
+    emitCallLog(sock, CALLER, 0, 12);
+    await wait();
+    assert.strictEqual(callerMessages(sock).length, 2, "call-log connected offline harus tetap membatalkan auto-reply");
+
+    sock.ev.emit("call", [{ id: "OFFLINE-MISSED", from: CALLER, status: "offer", offline: true }]);
+    sock.ev.emit("call", [{ id: "OFFLINE-MISSED", from: CALLER, status: "terminate", offline: true }]);
+    emitCallLog(sock, CALLER, 1, 0);
+    await wait();
+    assert.strictEqual(callerMessages(sock).length, 3, "call-log missed offline harus tetap memicu satu balasan");
+
     sock.ev.emit("call", [{ id: "TRANSPORTED", from: CALLER, status: "offer" }]);
     sock.ev.emit("call", [{ id: "TRANSPORTED", from: CALLER, status: "transport" }]);
     sock.ev.emit("call", [{ id: "TRANSPORTED", from: CALLER, status: "terminate" }]);
     await wait();
-    assert.strictEqual(callerMessages(sock).length, 2, "transport adalah bukti koneksi dan tidak boleh dibalas");
+    assert.strictEqual(callerMessages(sock).length, 3, "transport adalah bukti koneksi dan tidak boleh dibalas");
 
     const beforeAmbiguous = callerMessages(sock).length;
     emitAmbiguousTerminate(sock, "AMBIGUOUS-NO-LOG");
@@ -175,19 +189,19 @@ async function run() {
     emitMissedCall(sock, "AFTER-ANSWER");
     await wait();
     messages = callerMessages(sock);
-    assert.strictEqual(messages.length, 5, "setelah pernah mendapat voice note, panggilan berikutnya tetap dibalas");
-    assert.match(messages[4].content.text, /tidak bisa dihubungi lewat telepon/i, "answered tidak boleh mereset hitungan runtime");
+    assert.strictEqual(messages.length, 6, "setelah pernah mendapat voice note, panggilan berikutnya tetap dibalas");
+    assert.match(messages[5].content.text, /tidak bisa dihubungi lewat telepon/i, "answered tidak boleh mereset hitungan runtime");
 
     sock.ev.emit("call", [{ id: "DURATION", from: CALLER, status: "offer" }]);
     sock.ev.emit("call", [{ id: "DURATION", from: CALLER, status: "terminate", duration: 12 }]);
     await wait();
-    assert.strictEqual(callerMessages(sock).length, 5, "panggilan berdurasi harus dianggap dijawab");
+    assert.strictEqual(callerMessages(sock).length, 6, "panggilan berdurasi harus dianggap dijawab");
 
     emitMissedCall(sock, "AFTER-DURATION");
     await wait();
     messages = callerMessages(sock);
-    assert.strictEqual(messages.length, 6, "panggilan setelah sesi berdurasi tetap harus dibalas");
-    assert.match(messages[5].content.text, /tidak bisa dihubungi lewat telepon/i, "durasi panggilan tidak mereset hitungan runtime");
+    assert.strictEqual(messages.length, 7, "panggilan setelah sesi berdurasi tetap harus dibalas");
+    assert.match(messages[6].content.text, /tidak bisa dihubungi lewat telepon/i, "durasi panggilan tidak mereset hitungan runtime");
 
     const markerSock = createSocket();
     const markerCaller = "628333333333@s.whatsapp.net";
@@ -209,8 +223,8 @@ async function run() {
     emitAmbiguousTerminate(sock, "AFTER-RESTART");
     await wait(330);
     messages = callerMessages(sock);
-    assert.strictEqual(messages.length, 7, "terminate-only setelah restart harus tetap membuka giliran voice note pertama");
-    assert.ok(Buffer.isBuffer(messages[6].content.audio), "panggilan pertama setelah restart harus berupa voice note");
+    assert.strictEqual(messages.length, 8, "terminate-only setelah restart harus tetap membuka giliran voice note pertama");
+    assert.ok(Buffer.isBuffer(messages[7].content.audio), "panggilan pertama setelah restart harus berupa voice note");
     assert.match(spokenTexts.at(-1), /^Halo, I! /, "voice note setelah restart tetap harus personal");
 
     const converted = await callHandler._prepareFirstVoiceAudioForTest({
