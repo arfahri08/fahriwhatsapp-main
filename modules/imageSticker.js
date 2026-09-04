@@ -7,8 +7,8 @@ const messageCleaner = require("./messageCleaner");
 
 const TEMP_DIR = path.join(__dirname, "../data/sticker_tmp");
 const CONFIG_FILE = path.join(__dirname, "../data/stickerPack.json");
-const DEFAULT_PACK_NAME = "USERBOT FAHRI";
-const DEFAULT_AUTHOR = "USERBOT FAHRI";
+const DEFAULT_PACK_NAME = "USERBOT";
+const DEFAULT_AUTHOR = "USERBOT";
 const FFMPEG_TIMEOUT_MS = 60 * 1000;
 const VIDEO_STICKER_MAX_SECONDS = Number(process.env.STICKER_VIDEO_MAX_SECONDS || 6);
 const VIDEO_STICKER_FPS = Number(process.env.STICKER_VIDEO_FPS || 12);
@@ -89,7 +89,7 @@ function makeTempPath(ext) {
 
 function buildStickerExif(packName, author) {
     const json = {
-        "sticker-pack-id": "com.userbot.fahri",
+        "sticker-pack-id": "com.userbot.app",
         "sticker-pack-name": packName || DEFAULT_PACK_NAME,
         "sticker-pack-publisher": author || DEFAULT_AUTHOR,
         emojis: ["🤖"],

@@ -1,8 +1,15 @@
 const axios = require("axios");
+const { sendImageAlbum } = require("./mediaAlbum");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const { spawn } = require("child_process");
 
 const API_TIMEOUT_MS = 30000;
 const SEND_DELAY_MS = 900;
 const MAX_IMAGE_SEND = 15;
+const YTDLP_BIN = process.env.YTDLP_BIN || "yt-dlp";
+const YTDLP_TEMP_DIR = process.env.DOWNLOADER_TEMP_DIR || path.join(os.tmpdir(), "userbot-downloads");
 const PINTEREST_HOST = "https://id.pinterest.com";
 const PINTEREST_PIN_REGEX = /^(?:https?:\/\/(?:www\.|\w+\.)?pinterest\.[a-z.]+\/pin\/(\d{5,30})\/?|https?:\/\/(?:www\.)?pin\.it\/([a-zA-Z0-9]+)\/?|(\d{5,30}))$/i;
 const PINTEREST_HEADERS = {
@@ -19,11 +26,6 @@ const PLATFORM_PATTERNS = [
         test: /(pinterest\.com|pin\.it)/i,
     },
     {
-        id: "facebook",
-        name: "Facebook",
-        test: /(facebook\.com|fb\.watch|fb\.com)/i,
-    },
-    {
         id: "soundcloud",
         name: "SoundCloud",
         test: /(soundcloud\.com)/i,
@@ -35,14 +37,6 @@ const API_CANDIDATES = {
         url => ({
             method: "GET",
             url: `https://www.tikwm.com/api/?url=${encodeURIComponent(url)}`,
-        }),
-        url => ({
-            method: "GET",
-            url: `https://tikwmapi.com/api/?url=${encodeURIComponent(url)}`,
-        }),
-        url => ({
-            method: "GET",
-            url: `https://api.tiklydown.eu.org/api/download?url=${encodeURIComponent(url)}`,
         }),
     ],
     pinterest: [
@@ -77,6 +71,20 @@ const API_CANDIDATES = {
             url: `https://api.ryzendesu.vip/api/downloader/fbdown?url=${encodeURIComponent(url)}`,
         }),
     ],
+    instagram: [
+        url => ({
+            method: "GET",
+            url: `https://api.vreden.my.id/api/v1/download/instagram?url=${encodeURIComponent(url)}`,
+        }),
+        url => ({
+            method: "GET",
+            url: `https://api.agatz.xyz/api/instagram?url=${encodeURIComponent(url)}`,
+        }),
+        url => ({
+            method: "GET",
+            url: `https://api.ryzendesu.vip/api/downloader/igdl?url=${encodeURIComponent(url)}`,
+        }),
+    ],
     soundcloud: [
         url => ({
             method: "GET",
@@ -95,6 +103,40 @@ const API_CANDIDATES = {
 
 function delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function runLocalYtDlp(url) {
+    fs.mkdirSync(YTDLP_TEMP_DIR, { recursive: true });
+    return new Promise((resolve, reject) => {
+        const output = path.join(YTDLP_TEMP_DIR, `extended_%(extractor)s_%(id)s_%(epoch)s.%(ext)s`);
+        const child = spawn(YTDLP_BIN, [
+            "--no-warnings", "--no-progress", "--no-playlist", "--socket-timeout", "20",
+            "--retries", "2", "--fragment-retries", "2", "--max-filesize", "95M",
+            "--print", "after_move:filepath", "-o", output, url,
+        ], { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+        let stdout = "";
+        let stderr = "";
+        child.stdout.on("data", chunk => { stdout += chunk.toString(); });
+        child.stderr.on("data", chunk => { stderr += chunk.toString(); });
+        child.on("error", error => reject(error.code === "ENOENT" ? new Error("yt-dlp belum terpasang") : error));
+        child.on("close", code => {
+            const files = [...new Set(stdout.split(/\r?\n/).map(item => item.trim()).filter(item => item && fs.existsSync(item)))];
+            if (code !== 0 || !files.length) {
+                reject(new Error((stderr || `yt-dlp keluar dengan kode ${code}`).trim().slice(-500)));
+                return;
+            }
+            resolve(files.slice(0, MAX_IMAGE_SEND).map(filePath => ({
+                filePath,
+                type: /\.(?:jpg|jpeg|png|webp|heic|heif)$/i.test(filePath) ? "image" : /\.(?:mp4|mov|webm|mkv)$/i.test(filePath) ? "video" : "audio",
+            })));
+        });
+    });
+}
+
+function cleanupLocalFiles(files = []) {
+    for (const item of files) {
+        try { if (item?.filePath && fs.existsSync(item.filePath)) fs.unlinkSync(item.filePath); } catch {}
+    }
 }
 
 function unwrapMessage(message) {
@@ -284,6 +326,8 @@ function isProbablyPageUrl(url) {
         clean.includes("vt.tiktok.com") ||
         clean.includes("facebook.com/") ||
         clean.includes("fb.watch") ||
+        clean.includes("instagram.com/") ||
+        clean.includes("instagr.am/") ||
         clean.includes("pinterest.com/pin") ||
         clean.includes("pin.it/") ||
         clean.includes("soundcloud.com/")
@@ -750,9 +794,10 @@ async function sendTikTokResult(sock, msg, result, platform, senderJid) {
     const mentions = [senderJid].filter(Boolean);
 
     if (result.images?.length) {
-        for (let i = 0; i < result.images.length; i += 1) {
-            await sendImage(sock, jid, result.images[i], i === 0 ? caption : "", i === 0 ? mentions : [], msg);
-            if (i < result.images.length - 1) await delay(SEND_DELAY_MS);
+        if (result.images.length > 1) {
+            await sendImageAlbum(sock, jid, result.images, { caption, mentions, quoted: msg });
+        } else {
+            await sendImage(sock, jid, result.images[0], caption, mentions, msg);
         }
 
         if (result.audio) {
@@ -803,9 +848,10 @@ async function sendGenericResult(sock, msg, result, platform, senderJid) {
     }
 
     if (result.images?.length) {
-        for (let i = 0; i < result.images.length; i += 1) {
-            await sendImage(sock, jid, result.images[i], i === 0 ? caption : "", i === 0 ? mentions : [], msg);
-            if (i < result.images.length - 1) await delay(SEND_DELAY_MS);
+        if (result.images.length > 1) {
+            await sendImageAlbum(sock, jid, result.images, { caption, mentions, quoted: msg });
+        } else {
+            await sendImage(sock, jid, result.images[0], caption, mentions, msg);
         }
         return true;
     }
@@ -832,7 +878,30 @@ async function handleExtendedDownload(msg, sock) {
     try {
         await react(sock, msg, "⏳");
 
-        const apiResult = await callApiCandidates(platform.id, url);
+        let apiResult;
+        let localFiles = [];
+        try {
+            apiResult = await callApiCandidates(platform.id, url);
+        } catch (apiError) {
+            if (!["instagram", "facebook"].includes(platform.id)) throw apiError;
+            console.log(`[EXTENDED DOWNLOADER] ${platform.name} API fallback ke yt-dlp lokal`, { error: String(apiError.message || apiError).slice(0, 240) });
+            localFiles = await runLocalYtDlp(url);
+        }
+        if (localFiles.length) {
+            const localResult = {
+                video: localFiles.find(item => item.type === "video")?.filePath || null,
+                image: localFiles.filter(item => item.type === "image").length === 1
+                    ? localFiles.find(item => item.type === "image")?.filePath || null
+                    : null,
+                images: localFiles.filter(item => item.type === "image").map(item => item.filePath),
+                audio: localFiles.find(item => item.type === "audio")?.filePath || null,
+            };
+            const sent = await sendGenericResult(sock, msg, localResult, platform, senderJid);
+            cleanupLocalFiles(localFiles);
+            if (!sent) throw new Error("yt-dlp tidak menemukan media yang dapat dikirim.");
+            await react(sock, msg, "✅");
+            return true;
+        }
         const normalized = platform.id === "tiktok"
             ? normalizeTikTokResult(apiResult)
             : normalizeGenericResult(apiResult, platform.id);
@@ -846,12 +915,15 @@ async function handleExtendedDownload(msg, sock) {
         await react(sock, msg, "✅");
         return true;
     } catch (error) {
-        console.log(`[EXTENDED DOWNLOADER] ${platform.name} gagal: ${error.message}`);
+        console.log(`[EXTENDED DOWNLOADER] ${platform.name} gagal`, {
+            url: url.slice(0, 180),
+            error: String(error?.message || error).slice(0, 500),
+        });
         await react(sock, msg, "❌");
 
         try {
             await sock.sendMessage(from, {
-                text: "❌ Gagal mengunduh media. Link mungkin bersifat privat atau server sedang sibuk.",
+                text: `❌ Gagal mengunduh ${platform.name}. Link mungkin privat, sudah dihapus, atau semua sumber downloader sedang gagal. Coba kirim ulang beberapa saat lagi.`,
             }, { quoted: msg });
         } catch (sendError) {
             console.log(`[EXTENDED DOWNLOADER] Gagal kirim error: ${sendError.message}`);

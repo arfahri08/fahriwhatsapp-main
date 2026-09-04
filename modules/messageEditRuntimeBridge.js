@@ -2,8 +2,9 @@ const crypto = require("crypto")
 const fs = require("fs")
 const path = require("path")
 const secretEncryptedEdit = require("./secretEncryptedEdit")
+const statusBroadcastProvenance = require("./statusBroadcastProvenance")
 
-const BUILD = "EDIT-SECRET-2026-08-03.2"
+const BUILD = "EDIT-STATUS-PROVENANCE-2026-08-11.1"
 const TRACE_PATH = path.resolve(
     process.env.EDIT_TAP_TRACE_PATH
     || path.join(__dirname, "../data/editEventTrace.jsonl")
@@ -46,6 +47,31 @@ function rawUpdateUsesStatusTransport(rawUpdate, normalized = null) {
         normalized?.key,
     ].filter(Boolean)
     return keys.some(key => [key.remoteJid, key.remoteJidAlt].some(isStatusOrBroadcastJid))
+}
+
+function getStatusOrigin(...values) {
+    return statusBroadcastProvenance.findStatusProvenance(...values)
+}
+
+function logStatusEditSkip(source, origin, ...values) {
+    const inspected = origin?.inspected
+        || (origin?.messageIds ? origin : null)
+        || values.map(value => statusBroadcastProvenance.inspectEventStructure(value)).find(item => item.messageIds.length || item.transportJids.length)
+        || { messageIds: [], transportJids: [], keyShapes: [] }
+    const messageId = origin?.messageId || inspected.messageIds[0] || "-"
+    const originType = origin?.originType || "status/broadcast"
+    const match = origin?.match || "transport"
+    console.log(`[EDIT FILTER] SKIP ${originType} ${match} id=${messageId} source=${source}`)
+    appendTrace("skip-status-broadcast", {
+        source,
+        match,
+        originType,
+        originJid: origin?.originJid || "",
+        messageId,
+        messageIds: inspected.messageIds,
+        transportJids: inspected.transportJids,
+        keyShapes: inspected.keyShapes,
+    })
 }
 
 function getContext() {
@@ -190,11 +216,12 @@ function makeCacheMessage(normalized) {
     }
 }
 
-async function getOriginalText(normalized, context, guardian) {
+async function getOriginalText(normalized, context, guardian, cachedOriginal = null) {
     if (String(normalized?.originalText || "").trim()) return String(normalized.originalText).trim()
     try {
-        if (typeof context.getMessage !== "function") return ""
-        const content = await context.getMessage(normalized.key)
+        const content = cachedOriginal || (typeof context.getMessage === "function"
+            ? await context.getMessage(normalized.key)
+            : null)
         return guardian?.extractMessageText?.(content) || ""
     } catch {
         return ""
@@ -208,9 +235,13 @@ async function processNormalizedEdit(normalized, rawUpdate, source) {
 
     const chatJid = normalizeJid(normalized.key?.remoteJid || normalized.key?.remoteJidAlt)
     const messageId = String(normalized.key?.id || "").trim()
-    if (rawUpdateUsesStatusTransport(rawUpdate, normalized) || isStatusOrBroadcastJid(chatJid)) {
-        console.log(`[EDIT TAP] SKIP status/broadcast source=${source} id=${messageId || "-"}`)
-        appendTrace("skip-status-broadcast", { source, messageId, key: normalized?.key, rawUpdate })
+    let cachedOriginal = null
+    try {
+        if (typeof context.getMessage === "function") cachedOriginal = await context.getMessage(normalized.key)
+    } catch {}
+    const statusOrigin = getStatusOrigin(rawUpdate, normalized, cachedOriginal)
+    if (statusOrigin.matched || rawUpdateUsesStatusTransport(rawUpdate, normalized) || isStatusOrBroadcastJid(chatJid)) {
+        logStatusEditSkip(source, statusOrigin, rawUpdate, normalized, cachedOriginal)
         return { result: "status-broadcast" }
     }
     const editedText = String(normalized.editedText || "").trim()
@@ -234,7 +265,7 @@ async function processNormalizedEdit(normalized, rawUpdate, source) {
     }
 
     const senderJid = getSenderJid(normalized, context)
-    const originalText = await getOriginalText(normalized, context, guardian)
+    const originalText = await getOriginalText(normalized, context, guardian, cachedOriginal)
     console.log(`[EDIT TAP] DETECTED source=${source} chat=${chatJid} id=${messageId} sender=${senderJid || "-"}`)
     appendTrace("edit-detected", {
         source,
@@ -315,6 +346,11 @@ function handleMessagesUpdateEvent(updates) {
         const detected = detectEditShape(update, guardian)
         if (!detected) continue
         const key = update?.key || update?.update?.key || {}
+        const statusOrigin = getStatusOrigin(update, detected.normalized)
+        if (statusOrigin.matched) {
+            logStatusEditSkip("messages.update", statusOrigin, update, detected.normalized)
+            continue
+        }
         console.log(`[EDIT TAP] RAW messages.update chat=${key.remoteJid || key.remoteJidAlt || "-"} id=${key.id || "-"} updateKeys=${safeKeys(update?.update).join(",") || "-"} messageKeys=${safeKeys(update?.update?.message).join(",") || "-"}`)
         appendTrace("messages.update", {
             key,
@@ -345,12 +381,25 @@ function handleMessagesUpsertEvent(upsert) {
     const editCandidates = []
 
     for (const msg of messages) {
-        if (secretEncryptedEdit.hasStatusOrBroadcastTransport(msg)) {
-            appendTrace("skip-status-broadcast", {
-                source: "messages.upsert",
-                key: msg?.key,
-                messageKeys: safeKeys(msg?.message),
+        const rememberedOrigin = statusBroadcastProvenance.rememberStatusOrigin(msg, {
+            source: "messages.upsert",
+        })
+        if (rememberedOrigin.remembered) {
+            appendTrace("status-provenance-recorded", {
+                originType: rememberedOrigin.originType,
+                originJid: rememberedOrigin.originJid,
+                messageIds: rememberedOrigin.messageIds,
+                keyShapes: rememberedOrigin.keyShapes,
             })
+        }
+        if (rememberedOrigin.matched) {
+            let isEditLike = Boolean(
+                msg?.message?.secretEncryptedMessage
+                || msg?.message?.protocolMessage?.editedMessage
+                || msg?.message?.editedMessage
+            )
+            try { isEditLike = isEditLike || Boolean(guardian?.isMessageEditUpsert?.(msg)) } catch {}
+            if (isEditLike) logStatusEditSkip("messages.upsert", rememberedOrigin, msg)
             continue
         }
         if (secretEncryptedEdit.isSecretEncryptedEditMessage(msg)) {
@@ -397,6 +446,7 @@ function handleMessagesUpsertEvent(upsert) {
                 context.rememberMessageContent(msg)
             }
             guardian?.rememberOriginalMessage?.(msg, {
+                statusProvenanceChecked: true,
                 senderJid: typeof context.getMessageSenderJid === "function"
                     ? context.getMessageSenderJid(msg, context.sock)
                     : "",
@@ -493,6 +543,7 @@ function disposeMessageEditRuntimeBridge() {
     contextFactory = null
     processingQueue = Promise.resolve()
     dedupe.clear()
+    statusBroadcastProvenance.resetStatusProvenance()
     return true
 }
 
@@ -506,6 +557,7 @@ function getMessageEditRuntimeBridgeHealth() {
         build: BUILD,
         installed: Boolean(installedSocket && originalEmit),
         dedupeSize: dedupe.size,
+        statusProvenance: statusBroadcastProvenance.getStatusProvenanceHealth(),
         tracePath: TRACE_PATH,
     }
 }
@@ -518,5 +570,6 @@ module.exports = {
     getMessageEditRuntimeBridgeHealth,
     handleMessagesUpdateEvent,
     handleMessagesUpsertEvent,
+    statusBroadcastProvenance,
     isSecretEncryptedEditMessage: secretEncryptedEdit.isSecretEncryptedEditMessage,
 }

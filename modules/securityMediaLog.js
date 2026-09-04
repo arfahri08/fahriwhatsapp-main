@@ -1,5 +1,7 @@
 const fs = require("fs")
 const path = require("path")
+const contactNameStore = require("./contactNameStore")
+const lidAliasStore = require("./lidAliasStore")
 
 const DEFAULT_SECURITY_MEDIA_LOG_JID = "120363424006225997@g.us"
 const SECURITY_LOG_BUILD = "2026-07-21.6"
@@ -264,6 +266,22 @@ function safeSenderText(senderJid) {
     return clean || "Tidak diketahui"
 }
 
+function resolveSenderContactName(senderJid, providedName = "") {
+    const rawJid = String(senderJid || "").trim()
+    const resolvedJid = lidAliasStore.resolveBestJid(rawJid) || rawJid
+    const savedName = contactNameStore.resolveSavedContactName(resolvedJid)
+        || contactNameStore.resolveSavedContactName(rawJid)
+    if (savedName) return savedName
+
+    const fallbackName = String(providedName || "")
+        .normalize("NFKC")
+        .replace(/[\r\n\t]+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 120)
+    return fallbackName || "Belum tersimpan"
+}
+
 async function resolveSourceName(sock, sourceJid, providedName) {
     const name = String(providedName || "").trim()
     if (name) return name
@@ -397,12 +415,14 @@ async function sendViewOnceLog(sock, details = {}) {
         const sourceName = await resolveSourceName(sock, sourceJid, details.sourceName)
         const mention = normalizeMentionJid(details.senderJid)
         const mentions = mention ? [mention] : []
+        const senderContactName = resolveSenderContactName(details.senderJid, details.senderName)
         const lines = [
             "👁️ *VIEW ONCE LOG*",
             "",
             `Sumber: ${sourceName}`,
             `Chat ID: ${sourceJid}`,
             `Pengirim: ${safeSenderText(details.senderJid)}`,
+            `Nama kontak: ${senderContactName}`,
             `Waktu: ${formatTimestamp(details.messageTimestamp)}`,
             `Tipe: ${mediaType || "other"}`,
             `Caption asli: ${shorten(details.caption) || "Tidak ada caption"}`,

@@ -102,10 +102,10 @@ async function main() {
 
         const memberResult = await antiToxic.handleToxicCheck({
             key: { remoteJid: groupJid, fromMe: false, participant: memberJid, id: "MEMBER-TEXT" },
-            message: { conversation: "anjing" },
+            message: { conversation: "dasar anjing lu" },
             pushName: "Member",
         }, sock, ownerJid, {})
-        assert.strictEqual(memberResult, true, "member biasa di grup tetap harus dimoderasi")
+        assert.strictEqual(memberResult, true, "serangan langsung member di grup tetap harus dimoderasi")
         assert.strictEqual(sent.length, 1, "member toxic harus menghasilkan tepat satu warning")
         assert.strictEqual(sent[0].jid, groupJid, "warning member harus dikirim ke grup")
         assert.strictEqual(sent[0].options?.quoted?.key?.id, "MEMBER-TEXT", "warning harus reply pesan pelanggar")
@@ -119,7 +119,7 @@ async function main() {
     console.log("- owner/fromMe group sticker: exempt")
     console.log("- owner/fromMe private: exempt")
     console.log("- legacy env cannot re-enable owner warning")
-    console.log("- ordinary group member still receives one quoted + mentioned warning")
+    console.log("- directly abusive group member still receives one quoted + mentioned warning")
 }
 
 main().catch(error => {

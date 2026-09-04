@@ -6,6 +6,7 @@ const reflectionConfig = require("./antiToxicReflectionConfig");
 const lidAliasStore = require("./lidAliasStore");
 const antiToxicStickerOcr = require("./antiToxicStickerOcr");
 const antiToxicMatcher = require("./antiToxicMatcher");
+const antiToxicContext = require("./antiToxicContext");
 
 const WORDS_FILE = path.join(__dirname, "../data/kataKasar.json");
 const SEND_TIMEOUT_MS = Number(process.env.ANTI_TOXIC_SEND_TIMEOUT_MS || 12000);
@@ -1752,6 +1753,31 @@ function getIncomingText(msg) {
     ).trim();
 }
 
+function getIncomingContextInfo(msg) {
+    const message = unwrapTextContainerMessage(msg?.message || {});
+    const content = message.extendedTextMessage
+        || message.imageMessage
+        || message.videoMessage
+        || message.documentMessage
+        || message.buttonsResponseMessage
+        || message.listResponseMessage
+        || message.templateButtonReplyMessage
+        || {};
+    return content.contextInfo || {};
+}
+
+function getContextClassifierMetadata(msg, remoteJid) {
+    const contextInfo = getIncomingContextInfo(msg);
+    return {
+        isGroup: isGroupJid(remoteJid),
+        isReply: Boolean(contextInfo?.quotedMessage && contextInfo?.participant),
+        hasMentions: Array.isArray(contextInfo?.mentionedJid) && contextInfo.mentionedJid.length > 0,
+        quotedText: contextInfo?.quotedMessage
+            ? getIncomingText({ message: contextInfo.quotedMessage }).slice(0, 300)
+            : "",
+    };
+}
+
 function isStickerMessage(msg) {
     return Boolean(getStickerMessage(msg));
 }
@@ -2497,6 +2523,30 @@ function buildDetectionDetailText(toxicMatch, triggeredWord, canonicalWord) {
     return "";
 }
 
+function buildDetectionOpeningText(toxicMatch, triggeredWord, isStickerOcr) {
+    if (isStickerOcr) return "Stiker yang kamu kirim terdeteksi mengandung kata kasar.\n";
+    if (toxicMatch?.detectionSource !== "context-ai") {
+        return `Kamu terdeteksi mengucapkan kata kasar terlarang: *"${triggeredWord}"*!\n`;
+    }
+
+    const categoryLabel = ({
+        insult: "ejekan yang merendahkan",
+        hostile_sarcasm: "sarkasme yang merendahkan",
+        harassment: "ucapan yang menyerang atau mempermalukan",
+        threat: "ancaman",
+        profanity_attack: "umpatan yang diarahkan kepada orang lain",
+    })[toxicMatch.contextAnalysis?.category] || "ucapan kasar berdasarkan konteks";
+    const evidence = String(toxicMatch.contextAnalysis?.evidence || toxicMatch.matchedInput || "")
+        .replace(/[\r\n\t]+/g, " ")
+        .replace(/\s{2,}/g, " ")
+        .trim()
+        .slice(0, 100);
+
+    return evidence
+        ? `Kalimatmu terdeteksi sebagai ${categoryLabel}: *"${evidence}"*.\n`
+        : `Kalimatmu terdeteksi sebagai ${categoryLabel}.\n`;
+}
+
 function buildTranslatedAliasEntries() {
     return TRANSLATED_TOXIC_ALIASES
         .flatMap(group => {
@@ -2679,6 +2729,12 @@ async function findToxicMatchWithTranslation(text) {
         const translatedMatch = findToxicMatch(translation.translatedText);
         const aliasMatch = translatedMatch.word ? translatedMatch : findTranslatedToxicAlias(translation.translatedText);
         if (aliasMatch.word) {
+            const translatedLocalSafe = antiToxicContext.classifyLocalSafeContext(
+                translation.translatedText,
+                { lexicalMatch: aliasMatch }
+            );
+            if (translatedLocalSafe) continue;
+
             return {
                 ...aliasMatch,
                 originalTokens,
@@ -2696,6 +2752,24 @@ async function findToxicMatchWithTranslation(text) {
         detectionSource: translations.length ? "translated-clean" : "none",
         translationCandidates: translations,
     };
+}
+
+async function findContextAwareToxicMatch(text, context = {}) {
+    const lexicalMatch = findToxicMatch(text);
+    const classifierContext = {
+        ...context,
+        lexicalMatch,
+    };
+    const localSafeResult = antiToxicContext.classifyLocalSafeContext(text, classifierContext);
+    if (localSafeResult) {
+        return antiToxicContext.applyContextDecision(text, lexicalMatch, localSafeResult);
+    }
+
+    const contextResult = await antiToxicContext.classifyToxicContext(text, classifierContext);
+    const contextualMatch = antiToxicContext.applyContextDecision(text, lexicalMatch, contextResult);
+
+    if (contextualMatch) return contextualMatch;
+    return findToxicMatchWithTranslation(text);
 }
 
 function pickQuote(profile) {
@@ -4103,13 +4177,17 @@ async function handleCekKasarCommand(msg, sock, ownerJid, text) {
         return true;
     }
 
-    const toxicMatch = await findToxicMatchWithTranslation(checkText);
+    const toxicMatch = await findContextAwareToxicMatch(
+        checkText,
+        getContextClassifierMetadata(msg, remoteJid)
+    );
     const detected = Boolean(toxicMatch.word);
     const triggeredWord = detected ? (toxicMatch.matchedAlias || toxicMatch.word) : "-";
     const canonicalWord = detected ? toxicMatch.word : "-";
     const detectionSource = getDebugDetectionSource(toxicMatch);
     const matchedInput = toxicMatch.matchedInput || toxicMatch.matchedNormalizedInput || "-";
     const ownerExempt = Boolean(isOwner && !shouldWarnOwnerMessage(msg));
+    const contextAnalysis = toxicMatch.contextAnalysis;
 
     await safeSend(sock, remoteJid, {
         text: [
@@ -4120,6 +4198,10 @@ async function handleCekKasarCommand(msg, sock, ownerJid, text) {
             `Canonical: ${canonicalWord}`,
             `Source: ${detectionSource}`,
             `Matched input: ${matchedInput}`,
+            `Context label: ${contextAnalysis?.label || "-"}`,
+            `Context confidence: ${Number.isFinite(contextAnalysis?.confidence) ? contextAnalysis.confidence.toFixed(2) : "-"}`,
+            `Context category: ${contextAnalysis?.category || "-"}`,
+            `Context reason: ${contextAnalysis?.reason || "-"}`,
             `Word count: ${words.length}`,
             `Sender owner exempt: ${ownerExempt ? "YES" : "NO"}`,
         ].join("\n"),
@@ -4143,6 +4225,7 @@ async function handleAntiToxicStatusCommand(msg, sock, ownerJid, text) {
     const words = loadWords(true);
     const botJid = normalizeJid(sock?.user?.id) || sock?.user?.id || "-";
     const readyState = getSocketReadyState(sock);
+    const contextHealth = antiToxicContext.getHealth();
 
     await safeSend(sock, remoteJid, {
         text: [
@@ -4156,6 +4239,12 @@ async function handleAntiToxicStatusCommand(msg, sock, ownerJid, text) {
             `Send retry attempts: ${SEND_RETRY_ATTEMPTS}`,
             `Debug: ${isAntiToxicDebug() ? "true" : "false"}`,
             `Last word file: ${WORDS_FILE}`,
+            `Context AI: ${contextHealth.status}`,
+            `Context model: ${contextHealth.model}`,
+            `Context scan all: ${contextHealth.scanAll ? "true" : "false"}`,
+            `Context confidence: ${contextHealth.confidenceThreshold.toFixed(2)}`,
+            `Context implicit confidence: ${contextHealth.implicitConfidenceThreshold.toFixed(2)}`,
+            `Context cache: ${contextHealth.cacheEntries}`,
             `Bot JID: ${botJid}`,
             `Active socket: ${canAttemptSend(sock) ? "true" : "false"}`,
             `Socket readyState: ${readyState ?? "-"}`,
@@ -4178,8 +4267,9 @@ async function handleAntiToxicReloadCommand(msg, sock, ownerJid, text) {
     }
 
     const words = loadWords(true);
+    antiToxicContext.clearCache();
     await safeSend(sock, remoteJid, {
-        text: `ANTI-TOXIC RELOAD\nWord count: ${words.length}`,
+        text: `ANTI-TOXIC RELOAD\nWord count: ${words.length}\nContext cache: cleared`,
     }, { quoted: msg });
 
     return true;
@@ -4516,7 +4606,9 @@ async function handleToxicCheckInner(msg, sock, ownerJid, options = {}) {
         return false;
     }
 
-    const toxicMatch = await findToxicMatchWithTranslation(text);
+    const toxicMatch = isStickerOcr
+        ? await findToxicMatchWithTranslation(text)
+        : await findContextAwareToxicMatch(text, getContextClassifierMetadata(msg, remoteJid));
     const triggeredWord = toxicMatch.matchedAlias || toxicMatch.word;
     const canonicalWord = toxicMatch.word;
     debugAntiToxic("match-result", {
@@ -4535,7 +4627,9 @@ async function handleToxicCheckInner(msg, sock, ownerJid, options = {}) {
     }
 
     console.log("[ANTI-TOXIC DEBUG]", {
-        stage: toxicMatch.detectionSource === "translated"
+        stage: toxicMatch.detectionSource === "context-ai"
+            ? "context-toxic-detected"
+            : toxicMatch.detectionSource === "translated"
             ? "translated-toxic-detected"
             : toxicMatch.detectionSource === "variant"
                 ? "variant-toxic-detected"
@@ -4559,6 +4653,10 @@ async function handleToxicCheckInner(msg, sock, ownerJid, options = {}) {
         translatedText: toxicMatch.translatedText,
         translatedLanguage: toxicMatch.translatedLanguage,
         detectedLanguage: toxicMatch.detectedLanguage,
+        contextLabel: toxicMatch.contextAnalysis?.label,
+        contextConfidence: toxicMatch.contextAnalysis?.confidence,
+        contextCategory: toxicMatch.contextAnalysis?.category,
+        contextReason: toxicMatch.contextAnalysis?.reason,
     });
 
     const isOwnerSender = Boolean(msg?.key?.fromMe || isSameUser(senderJid, ownerJid));
@@ -4702,9 +4800,7 @@ async function handleToxicCheckInner(msg, sock, ownerJid, options = {}) {
             ? buildStickerOcrWarningContext(stickerOcrResult, triggeredWord)
             : "";
         const detectionDetailText = isStickerOcr ? "" : buildDetectionDetailText(toxicMatch, triggeredWord, canonicalWord);
-        const detectionOpeningText = isStickerOcr
-            ? "Stiker yang kamu kirim terdeteksi mengandung kata kasar.\n"
-            : `Kamu terdeteksi mengucapkan kata kasar terlarang: *"${triggeredWord}"*!\n`;
+        const detectionOpeningText = buildDetectionOpeningText(toxicMatch, triggeredWord, isStickerOcr);
         const responseText =
             `${mentionHeader}\n\n` +
             detectionOpeningText +
@@ -5029,9 +5125,7 @@ async function handleToxicCheckInner(msg, sock, ownerJid, options = {}) {
         ? buildStickerOcrWarningContext(stickerOcrResult, triggeredWord)
         : "";
     const detectionDetailText = isStickerOcr ? "" : buildDetectionDetailText(toxicMatch, triggeredWord, canonicalWord);
-    const detectionOpeningText = isStickerOcr
-        ? "Stiker yang kamu kirim terdeteksi mengandung kata kasar.\n"
-        : `Kamu terdeteksi mengucapkan kata kasar terlarang: *"${triggeredWord}"*!\n`;
+    const detectionOpeningText = buildDetectionOpeningText(toxicMatch, triggeredWord, isStickerOcr);
     const responseText =
         `${mentionHeader}\n\n` +
         detectionOpeningText +
@@ -5244,7 +5338,9 @@ module.exports = {
     handleToxicCheck,
     findToxicWord,
     findToxicMatch,
+    findContextAwareToxicMatch,
     getAntiToxicMatcherOptions,
+    getAntiToxicContextHealth: antiToxicContext.getHealth,
     handleAntiToxicSafeMatcherCommand: (sock, msg, context = {}) => antiToxicMatcher.handleAntiToxicSafeMatcherCommand(sock, msg, {
         ...context,
         getMatcherOptions: getAntiToxicMatcherOptions,

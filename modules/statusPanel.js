@@ -186,7 +186,7 @@ Kalau tombol/list tidak muncul di WhatsApp kamu, pakai command cepat ini:
 • *.status tidur* → 💤 Sedang Istirahat
 • *.status off* → ❌ Matikan custom auto-reply
 
-_Watermark: USERBOT FAHRI_`;
+_Watermark: USERBOT_`;
 }
 
 function getPanelText(state) {
@@ -218,14 +218,14 @@ async function sendClassicButtonPanel(sock, jid, state) {
 
     const firstPanel = await sock.sendMessage(jid, {
         text: getPanelText(state),
-        footer: "Watermark: USERBOT FAHRI",
+        footer: "Watermark: USERBOT",
         buttons: firstButtons,
         headerType: 1,
     });
 
     const secondPanel = await sock.sendMessage(jid, {
         text: "Opsi status lainnya:",
-        footer: "Watermark: USERBOT FAHRI",
+        footer: "Watermark: USERBOT",
         buttons: secondButtons,
         headerType: 1,
     });
@@ -252,13 +252,13 @@ async function sendTemplateButtonPanel(sock, jid, state) {
 
     const firstPanel = await sock.sendMessage(jid, {
         text: getPanelText(state),
-        footer: "Watermark: USERBOT FAHRI",
+        footer: "Watermark: USERBOT",
         templateButtons: firstButtons,
     });
 
     const secondPanel = await sock.sendMessage(jid, {
         text: "Opsi status lainnya:",
-        footer: "Watermark: USERBOT FAHRI",
+        footer: "Watermark: USERBOT",
         templateButtons: secondButtons,
     });
 
@@ -281,14 +281,14 @@ async function sendNativePanel(sock, jid, state) {
                 },
                 interactiveMessage: proto.Message.InteractiveMessage.create({
                     header: proto.Message.InteractiveMessage.Header.create({
-                        title: "USERBOT FAHRI",
+                        title: "USERBOT",
                         hasMediaAttachment: false,
                     }),
                     body: proto.Message.InteractiveMessage.Body.create({
                         text: getPanelText(state),
                     }),
                     footer: proto.Message.InteractiveMessage.Footer.create({
-                        text: "Watermark: USERBOT FAHRI",
+                        text: "Watermark: USERBOT",
                     }),
                     nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
                         buttons: [
@@ -339,7 +339,7 @@ async function sendButtonPanel(sock, jid, state) {
                         text: getPanelText(state),
                     }),
                     footer: proto.Message.InteractiveMessage.Footer.create({
-                        text: "Watermark: USERBOT FAHRI",
+                        text: "Watermark: USERBOT",
                     }),
                     nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
                         buttons,
@@ -394,9 +394,9 @@ async function sendPanel(sock, jid, state) {
 
     try {
         const listPanel = await sock.sendMessage(targetJid, {
-            title: "USERBOT FAHRI",
+            title: "USERBOT",
             text: getPanelText(state),
-            footer: "Watermark: USERBOT FAHRI",
+            footer: "Watermark: USERBOT",
             buttonText: "Buka Pilihan Status",
             sections: [
                 {

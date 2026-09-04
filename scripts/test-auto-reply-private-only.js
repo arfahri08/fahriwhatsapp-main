@@ -1,6 +1,8 @@
 "use strict"
 
 const assert = require("assert")
+const fs = require("fs")
+const path = require("path")
 
 const autoReply = require("../modules/autoReply")
 const autoReplyScope = require("../modules/autoReplyScope")
@@ -165,6 +167,8 @@ test("14. private Custom Auto Reply bekerja", () => {
         customStatusText: "sedang menguji",
     })
     assert.ok(reply?.text?.includes("sedang menguji"))
+    assert.match(reply?.text || "", /USERBOT/)
+    assert.match(reply?.text || "", /^Halo, \{name\}! Saat ini USERBOT /)
     assert.strictEqual(customAutoReply.getReplyMessageForMessage(groupText(), [], {
         isCustomAutoReplyOn: true,
         customStatusText: "sedang menguji",
@@ -253,7 +257,9 @@ test("23. help menjelaskan kebijakan Auto Reply dan group", () => {
     assert.ok(text.includes("Auto Reply hanya bekerja melalui private chat."))
     assert.ok(text.includes("Notifikasi Auto Reply Forwarder dikirim ke grup notification, bukan PM owner."))
     assert.ok(text.includes("Keyword Reply otomatis hanya bekerja di private chat."))
-    assert.ok(text.includes("Saat Bot group ON, command dan fitur yang memang mendukung group tetap dapat digunakan sesuai permission dan konfigurasi masing-masing."))
+    assert.ok(text.includes("Grup baru selalu Bot group OFF"))
+    assert.ok(text.includes("Owner mengaktifkannya dengan `.bot on`"))
+    assert.ok(text.includes("fitur biasa dapat dipakai"))
 })
 
 test("24. health menampilkan scope dan aman saat status gagal dibaca", async () => {
@@ -329,6 +335,67 @@ test("28. Auto Reply bisa mematikan quoted bubble per pemanggilan", async () => 
     const privateReply = sent.find(item => item.jid === PRIVATE_JID)
     assert.ok(privateReply)
     assert.strictEqual(privateReply.options, undefined)
+})
+
+test("29. Auto Reply memprioritaskan nama kontak tersimpan dan hanya memakai kata pertama", async () => {
+    const sent = []
+    const source = privateText("pesan", { pushName: "Nama Profil WhatsApp" })
+    const contactNameStore = {
+        resolveContactName: jid => jid === PRIVATE_JID ? "I Linda" : "",
+    }
+    const sock = { sendMessage: async (jid, content, options) => { sent.push({ jid, content, options }); return {} } }
+
+    assert.strictEqual(autoReplyForwarder.getFirstName(source, {
+        senderJid: PRIVATE_JID,
+        contactNameStore,
+    }), "I")
+    assert.strictEqual(autoReplyForwarder.renderPersonalText(
+        "Selamat pagi, {name}. Pesan kamu sudah diterima.",
+        source,
+        { senderJid: PRIVATE_JID, contactNameStore }
+    ), "Selamat pagi, I. Pesan kamu sudah diterima.")
+
+    await autoReplyForwarder.sendAutoReply(sock, PRIVATE_JID, {
+        text: "Selamat pagi, {name}. Pesan kamu sudah diterima.",
+    }, {
+        msg: source,
+        senderJid: PRIVATE_JID,
+        contactNameStore,
+        quotedBubble: true,
+    })
+    const privateReply = sent.find(item => item.jid === PRIVATE_JID)
+    assert.strictEqual(privateReply?.content?.text, "Selamat pagi, I. Pesan kamu sudah diterima.")
+})
+
+test("30. Auto Reply fallback ke nama profil WhatsApp jika kontak belum tersimpan", () => {
+    const msg = privateText("halo", { pushName: "Siti Rahma" })
+    const contactNameStore = { resolveContactName: () => "" }
+    assert.strictEqual(autoReplyForwarder.getFirstName(msg, {
+        senderJid: PRIVATE_JID,
+        contactNameStore,
+    }), "Siti")
+})
+
+test("31. Auto Reply dapat menemukan nama kontak melalui kandidat alias nomor", () => {
+    const lid = "123456789012345@lid"
+    const msg = message(lid, { conversation: "halo" }, { pushName: "Nama WA" })
+    const contactNameStore = {
+        resolveContactName: jid => jid === PRIVATE_JID ? "I Linda" : "",
+    }
+    assert.strictEqual(autoReplyForwarder.getFirstName(msg, {
+        senderJid: lid,
+        contactJids: [PRIVATE_JID, lid],
+        contactNameStore,
+    }), "I")
+})
+
+test("32. Seluruh corpus balasan random memakai branding USERBOT", () => {
+    const corpus = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "data", "replies.json"), "utf8"))
+    assert.ok(corpus.length > 0)
+    for (const reply of corpus) {
+        assert.match(reply, /USERBOT/)
+        assert.match(reply, /— USERBOT$/)
+    }
 })
 
 async function main() {

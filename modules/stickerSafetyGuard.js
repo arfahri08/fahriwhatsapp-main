@@ -396,10 +396,11 @@ function getEffectiveConfig(groupJid = "", context = {}) {
     };
 
     const groupRemoteControl = context.groupRemoteControl;
+    const runtimePolicy = context.runtimePolicy || {};
     if (isGroupJid(jid) && groupRemoteControl?.isGroupFeatureEnabled) {
-        if (!groupRemoteControl.isGroupFeatureEnabled(jid, "stickerSafety")) merged.enabled = false;
-        if (!groupRemoteControl.isGroupFeatureEnabled(jid, "stickerText")) merged.textEnabled = false;
-        if (!groupRemoteControl.isGroupFeatureEnabled(jid, "stickerNsfw")) merged.nsfwEnabled = false;
+        if (!groupRemoteControl.isGroupFeatureEnabled(jid, "stickerSafety", runtimePolicy)) merged.enabled = false;
+        if (!groupRemoteControl.isGroupFeatureEnabled(jid, "stickerText", runtimePolicy)) merged.textEnabled = false;
+        if (!groupRemoteControl.isGroupFeatureEnabled(jid, "stickerNsfw", runtimePolicy)) merged.nsfwEnabled = false;
     }
 
     return {

@@ -1088,6 +1088,7 @@ async function sendSecurityViewOnceReport(sock, record) {
     return securityMediaLog.sendViewOnceLog(sock, {
         sourceJid: record?.key?.remoteJid,
         senderJid: record?.senderJid,
+        senderName: record?.pushName,
         messageId: record?.key?.id,
         mediaType: record?.type || "other",
         messageTimestamp: record?.messageTimestamp,

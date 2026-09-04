@@ -247,7 +247,7 @@ function isDangerousDirectory(dir) {
 function isSafeExternalMediaDir(dir) {
     if (!isExternalStoragePath(dir)) return true;
     const baseName = path.basename(path.resolve(dir)).toLowerCase();
-    return /userbot|fahri|viewonce|view_once|cleanmedia|baileys/.test(baseName);
+    return /userbot|viewonce|view_once|cleanmedia|baileys/.test(baseName);
 }
 
 function safeRealPath(dir) {
@@ -301,7 +301,7 @@ function inferCategoryFromDir(dir) {
     const normalized = path.basename(path.resolve(dir)).toLowerCase();
     const full = normalizePosixLike(dir);
     if (/view.?once|brankas.?vo|(^|[/_-])vo($|[/_-])/.test(full)) return "viewOnce";
-    if (/download|temp|tmp|userbot-fahri-downloads/.test(normalized)) return "videoDownloader";
+    if (/download|temp|tmp|userbot-downloads/.test(normalized)) return "videoDownloader";
     return "auto";
 }
 

@@ -3,6 +3,7 @@
 const crypto = require("crypto")
 const fs = require("fs")
 const path = require("path")
+const statusBroadcastProvenance = require("./statusBroadcastProvenance")
 
 const DEFAULT_DATA_FILE = path.join(__dirname, "..", "data", "messageEditGuardian.json")
 const EDIT_PROTOCOL_TYPE = 14
@@ -39,7 +40,11 @@ function getRuntimeConfig() {
 }
 
 function getDataFile() {
-    return path.resolve(process.env.EDIT_GUARD_DATA_FILE || DEFAULT_DATA_FILE)
+    return path.resolve(
+        process.env.EDIT_GUARD_DATA_FILE
+        || process.env.MESSAGE_EDIT_GUARDIAN_STATE_PATH
+        || DEFAULT_DATA_FILE
+    )
 }
 
 function cloneDefaultStats() {
@@ -374,6 +379,7 @@ function findEditProtocol(container, depth = 0) {
 
 function normalizeEditUpsertMessage(msg) {
     if (!msg || typeof msg !== "object") return null
+    if (statusBroadcastProvenance.findStatusProvenance(msg).matched) return null
     const editedMessage = extractEditedMessage(msg)
     if (!editedMessage) return null
 
@@ -426,6 +432,7 @@ function isMessageEditUpsert(msg) {
 
 function normalizeMessageUpdate(update) {
     if (!update || typeof update !== "object") return null
+    if (statusBroadcastProvenance.findStatusProvenance(update).matched) return null
     const editedMessage = extractEditedMessage(update, { allowDirectUpdateMessage: true })
     if (!editedMessage) return null
 
@@ -521,6 +528,12 @@ function cleanupMessageEditCache(now = Date.now()) {
 
 function rememberOriginalMessage(msg, context = {}) {
     try {
+        if (context.statusProvenanceChecked !== true) {
+            const statusOrigin = statusBroadcastProvenance.rememberStatusOrigin(msg, {
+                source: "messageEditGuardian.rememberOriginalMessage",
+            })
+            if (statusOrigin.matched) return false
+        }
         const key = msg?.key || {}
         const remoteJid = pickChatJid(key.remoteJid, key.remoteJidAlt)
         const messageId = String(key.id || "").trim()
@@ -866,6 +879,12 @@ async function handleMessageEditUpdate(update, context = {}) {
         const rawEditedMessage = extractEditedMessage(update, { allowDirectUpdateMessage: true })
         if (!rawEditedMessage) return { handled: false, result: "not-edit" }
 
+        const statusOrigin = statusBroadcastProvenance.findStatusProvenance(update)
+        if (statusOrigin.matched) {
+            console.log(`[EDIT FILTER] SKIP ${statusOrigin.originType || "status/broadcast"} ${statusOrigin.match} id=${statusOrigin.messageId || "-"} source=messageEditGuardian`)
+            return { handled: false, result: "status-broadcast" }
+        }
+
         const normalized = normalizeMessageUpdate(update)
         if (!normalized) return { handled: false, result: "invalid-edit" }
         const now = Number(context.now || Date.now())
@@ -1021,6 +1040,22 @@ async function handleMessageEditUpdate(update, context = {}) {
             return finishLoggedSkip("logged-private", { skippedPrivate: 1 })
         }
 
+        // Edit logging is an internal security route and remains active, but
+        // moderation caused by a group edit must obey the same hard admin gate
+        // as normal messages. This also prevents private toxic warnings from a
+        // non-admin source group.
+        let groupModerationPolicy = null
+        if (typeof context.groupRemoteControl?.resolveGroupRuntimePolicy === "function") {
+            groupModerationPolicy = await context.groupRemoteControl.resolveGroupRuntimePolicy(
+                context.sock,
+                groupJid,
+                { featureName: "editGuardian" }
+            )
+            if (!groupModerationPolicy.allowed) {
+                return finishLoggedSkip("logged-group-runtime-off", { skippedBotOff: 1 })
+            }
+        }
+
         if (
             typeof context.groupRemoteControl?.isGroupBotEnabled === "function"
             && !context.groupRemoteControl.isGroupBotEnabled(groupJid)
@@ -1030,14 +1065,14 @@ async function handleMessageEditUpdate(update, context = {}) {
 
         if (
             typeof context.groupRemoteControl?.isGroupFeatureEnabled === "function"
-            && !context.groupRemoteControl.isGroupFeatureEnabled(groupJid, "editGuardian")
+            && !context.groupRemoteControl.isGroupFeatureEnabled(groupJid, "editGuardian", groupModerationPolicy || {})
         ) {
             return finishLoggedSkip("logged-edit-off")
         }
 
         if (
             typeof context.groupRemoteControl?.isGroupFeatureEnabled === "function"
-            && !context.groupRemoteControl.isGroupFeatureEnabled(groupJid, "antiToxic")
+            && !context.groupRemoteControl.isGroupFeatureEnabled(groupJid, "antiToxic", groupModerationPolicy || {})
         ) {
             return finishLoggedSkip("logged", { skippedAntiToxicOff: 1 })
         }

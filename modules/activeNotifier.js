@@ -44,7 +44,7 @@ function formatJakartaTime(date = new Date()) {
 
 function getActiveText(date = new Date()) {
     return (
-        `✅ *USERBOT FAHRI AKTIF*\n\n` +
+        `✅ *USERBOT AKTIF*\n\n` +
         `Bot sudah tersambung ke WhatsApp.\n` +
         `Waktu: ${formatJakartaTime(date)}\n\n` +
         `_Notifikasi otomatis setelah startup / restart / reconnect._`

@@ -2,6 +2,8 @@
 
 const fs = require("fs")
 const path = require("path")
+const groupRuntimePolicy = require("./groupRuntimePolicy")
+const defaultGroupRemoteControl = require("./groupRemoteControl")
 
 const DATA_FILE = process.env.GROUP_WELCOME_DATA_FILE
     ? path.resolve(process.env.GROUP_WELCOME_DATA_FILE)
@@ -64,7 +66,6 @@ const numberGuessSessions = new Map()
 const EVENT_DEDUPE_TTL_MS = 10 * 60 * 1000
 const EVENT_DELAY_MS = Math.max(0, Number(process.env.GROUP_WELCOME_EVENT_DELAY_MS || 1200))
 const recentEvents = new Map()
-const learnedBotIdentities = new Set()
 let stateCache = null
 
 function normalizeJid(value) {
@@ -285,52 +286,27 @@ function getPreferredParticipantJid(participant) {
 }
 
 function participantMatches(participant, candidates = []) {
-    const candidateUsers = new Set(unique(candidates).map(jidUser).filter(Boolean))
-    return normalizeParticipantCandidates(participant).some(value => candidateUsers.has(jidUser(value)))
+    return groupRuntimePolicy.participantMatches(participant, candidates)
 }
 
 function isAdminParticipant(participant) {
-    return ["admin", "superadmin"].includes(String(participant?.admin || "").toLowerCase())
+    return groupRuntimePolicy.isAdminParticipant(participant)
 }
 
 function getBotIdentityCandidates(sock, extraCandidates = []) {
-    return unique([
-        sock?.user?.id,
-        sock?.user?.lid,
-        sock?.user?.jid,
-        sock?.user?.phoneNumber,
-        sock?.user?.pn,
-        sock?.authState?.creds?.me?.id,
-        sock?.authState?.creds?.me?.lid,
-        sock?.authState?.creds?.me?.phoneNumber,
-        sock?.authState?.creds?.me?.pn,
-        ...learnedBotIdentities,
-        ...(Array.isArray(extraCandidates) ? extraCandidates : [extraCandidates]),
-    ])
+    return groupRuntimePolicy.getBotIdentityCandidates(sock, extraCandidates)
 }
 
 function rememberBotIdentityCandidates(sock, messageOrMsg) {
-    const msg = messageOrMsg?.key ? messageOrMsg : { key: messageOrMsg || {} }
-    const key = msg?.key || {}
-    if (key.fromMe !== true) return getBotIdentityCandidates(sock)
-
-    const candidates = unique([
-        key.participant,
-        key.participantAlt,
-        msg?.participant,
-        msg?.participantAlt,
-    ])
-    for (const candidate of candidates) learnedBotIdentities.add(candidate)
-    return getBotIdentityCandidates(sock)
+    return groupRuntimePolicy.rememberBotIdentityCandidates(sock, messageOrMsg)
 }
 
 function getBotParticipant(metadata, sock, extraCandidates = []) {
-    const identities = getBotIdentityCandidates(sock, extraCandidates)
-    return (metadata?.participants || []).find(participant => participantMatches(participant, identities)) || null
+    return groupRuntimePolicy.getBotParticipant(metadata, sock, extraCandidates)
 }
 
 function isBotAdmin(metadata, sock, extraCandidates = []) {
-    return isAdminParticipant(getBotParticipant(metadata, sock, extraCandidates))
+    return groupRuntimePolicy.isBotAdmin(metadata, sock, extraCandidates)
 }
 
 function getSenderParticipant(metadata, senderJid) {
@@ -491,14 +467,57 @@ function buildMenuSections() {
                 { header: "UPLOAD", title: "Image to URL", description: "Reply media lalu ketik .tourl", id: ".tourlinfo" },
                 { header: "STIKER", title: "Buat Stiker", description: "Kirim/reply gambar lalu ketik .s", id: ".stikerinfo" },
                 { header: "PDF", title: "Gambar ke PDF", description: "Ubah gambar menjadi dokumen PDF", id: ".pdfinfo" },
+                { header: "AUDIO", title: "Transkrip Audio/VN", description: "Reply audio atau VN lalu ketik .transkrip", id: ".transkrip" },
             ],
         },
         {
-            title: "ADMIN & MODERASI",
+            title: "GROUP ADMIN",
             rows: [
+                { header: "AKSES", title: "Buka Grup", description: "Izinkan semua anggota mengirim pesan", id: ".gcopen" },
+                { header: "AKSES", title: "Tutup Grup", description: "Batasi pengiriman hanya untuk admin", id: ".gcclose" },
+                { header: "JADWAL", title: "Jadwal Buka/Tutup", description: "Lihat jadwal otomatis grup", id: ".gcschedule status" },
+                { header: "PROFIL", title: "Ubah Nama Grup", description: "Format: .setnamegc Nama Baru", id: ".setnamegc" },
+                { header: "PROFIL", title: "Ubah Deskripsi Grup", description: "Format: .setdeskgc Deskripsi", id: ".setdeskgc" },
+                { header: "PROFIL", title: "Ubah Foto Grup", description: "Reply gambar lalu jalankan command", id: ".setppgc" },
+                { header: "PIN", title: "Pin Pesan", description: "Reply pesan; durasi default 24 jam", id: ".pin 24" },
+                { header: "TAG", title: "Tag Semua", description: "Mention semua anggota dengan teks", id: ".tagall" },
+                { header: "TAG", title: "Hidden Tag", description: "Mention silent; mendukung reply media", id: ".hidetag" },
+                { header: "POLL", title: "Buat Poll", description: "Format: .poll Pertanyaan | Opsi 1, Opsi 2", id: ".poll" },
+                { header: "KONTAK", title: "Export VCF", description: "Export participant unik menjadi VCF", id: ".exportvcf" },
+            ],
+        },
+        {
+            title: "MODERATION",
+            rows: [
+                { header: "WARNING", title: "Beri Warning", description: "Reply/mention anggota", id: ".warn" },
+                { header: "WARNING", title: "Daftar Warning", description: "Lihat warning anggota", id: ".listwarn" },
+                { header: "WARNING", title: "Reset Warning", description: "Reply/mention anggota", id: ".resetwarn" },
+                { header: "WARNING", title: "Batas Warning", description: "Lihat atau ubah batas warning", id: ".warnmax" },
+                { header: "FLOOD", title: "Status Slowmode", description: "Lihat mode dan cooldown grup", id: ".slowmode status" },
+                { header: "FLOOD", title: "Status Anti-Spam", description: "Lihat proteksi flood grup", id: ".antispam status" },
+                { header: "NSFW", title: "Moderasi Image NSFW", description: "Default OFF; admin dapat mengatur dan scan", id: ".nsfw status" },
                 { header: "GOODBYE", title: "Goodbye Message", description: "Cek status pesan anggota keluar", id: ".goodbye status" },
                 { header: "KICK", title: "Stiker Sebelum Kick", description: "Cek stiker yang dikirim sebelum kick", id: ".kicksticker status" },
                 { header: "PANDUAN", title: "Cara Kick Member", description: "Lihat cara reply/mention lalu kick", id: ".kickinfo" },
+            ],
+        },
+        {
+            title: "ATTENDANCE",
+            rows: [
+                { header: "ABSEN", title: "Mulai Absensi", description: "Buka sesi absensi baru", id: ".mulaiabsen Absensi Grup" },
+                { header: "ABSEN", title: "Isi Absensi", description: "Catat kehadiran di sesi aktif", id: ".absen" },
+                { header: "ABSEN", title: "Cek Absensi", description: "Lihat peserta sesi aktif", id: ".cekabsen" },
+                { header: "ABSEN", title: "Tutup Absensi", description: "Tutup dan arsipkan sesi aktif", id: ".hapusabsen" },
+            ],
+        },
+        {
+            title: "STORE",
+            rows: [
+                { header: "KATALOG", title: "Lihat Toko", description: "Produk aktif dan stok tersedia", id: ".shop" },
+                { header: "PRODUK", title: "Detail Produk", description: "Format: .produk ID", id: ".produk" },
+                { header: "ORDER", title: "Beli Produk", description: "Format: .beli ID", id: ".beli" },
+                { header: "ORDER", title: "Pesanan Saya", description: "Lihat transaksi customer", id: ".pesanan" },
+                { header: "WALLET", title: "Saldo Saya", description: "Wallet lokal dengan ledger", id: ".saldo" },
             ],
         },
         {
@@ -521,6 +540,10 @@ function buildFallbackMenuText(bodyText = "") {
     return [
         bodyText || "Akses cepat seluruh fitur grup dalam satu tempat.",
         "",
+        "STORE: `.shop` / `.produk` / `.beli` / `.pesanan` / `.saldo`",
+        "MODERATION: `.warn` / `.slowmode` / `.antispam` / `.nsfw`",
+        "GROUP ADMIN: `.gcopen` / `.gcschedule` / `.tagall` / `.exportvcf`",
+        "",
         "✦ *MENU GRUP • COMMAND CENTER* ✦",
         "1. `.groupinfo` — informasi grup",
         "2. `.rules` — peraturan grup",
@@ -529,8 +552,9 @@ function buildFallbackMenuText(bodyText = "") {
         "5. `.ping` — cek latency dan uptime",
         "6. `.tourl` — reply media untuk upload ke URL",
         "7. `.s` — reply/kirim gambar menjadi stiker",
-        "8. `.goodbye status` — status pesan keluar",
-        "9. `.kicksticker status` — status stiker kick",
+        "8. `.transkrip` — reply audio/VN menjadi teks",
+        "9. `.goodbye status` — status pesan keluar",
+        "10. `.kicksticker status` — status stiker kick",
         "10. `.games` — panduan semua game",
     ].filter(Boolean).join("\n")
 }
@@ -629,7 +653,30 @@ function createHarukaStyleInteractiveMessage(baileys, options = {}) {
     })
 }
 
+async function resolveGroupOutputPolicy(sock, groupJid, options = {}) {
+    if (!isGroupJid(groupJid)) {
+        return { allowed: true, reason: "not-group", groupJid: normalizeJid(groupJid) }
+    }
+    if (options.runtimePolicy?.allowed === true) return options.runtimePolicy
+    return groupRuntimePolicy.resolveGroupRuntimePolicy(sock, groupJid, {
+        groupRemoteControl: options.groupRemoteControl || defaultGroupRemoteControl,
+        featureName: options.featureName || "groupMenu",
+        ...(Object.prototype.hasOwnProperty.call(options, "metadata") ? { metadata: options.metadata } : {}),
+        extraIdentityCandidates: options.extraIdentityCandidates,
+    })
+}
+
+async function requireGroupOutputPolicy(sock, groupJid, options = {}) {
+    const policy = await resolveGroupOutputPolicy(sock, groupJid, options)
+    if (policy.allowed) return policy
+    const error = new Error(`Group output ditolak: ${policy.reason}`)
+    error.code = "GROUP_RUNTIME_DENIED"
+    error.policy = policy
+    throw error
+}
+
 async function sendHarukaStyleNativeFlowMenu(sock, groupJid, options = {}) {
+    const runtimePolicy = await requireGroupOutputPolicy(sock, groupJid, options)
     const baileys = options.baileys || require("@whiskeysockets/baileys")
     const { generateWAMessageFromContent } = baileys
     if (typeof generateWAMessageFromContent !== "function") {
@@ -660,6 +707,7 @@ async function sendHarukaStyleNativeFlowMenu(sock, groupJid, options = {}) {
 }
 
 async function sendLegacyListMenu(sock, groupJid, options = {}) {
+    await requireGroupOutputPolicy(sock, groupJid, options)
     const sections = (options.sections || buildMenuSections()).map(section => ({
         title: section.title,
         rows: (section.rows || []).map(row => ({
@@ -679,13 +727,23 @@ async function sendLegacyListMenu(sock, groupJid, options = {}) {
 }
 
 async function sendInteractiveMenu(sock, groupJid, options = {}) {
+    const runtimePolicy = await resolveGroupOutputPolicy(sock, groupJid, options)
+    if (!runtimePolicy.allowed) {
+        console.log("[GROUP OUTPUT GATE] Menu grup dibuat silent", {
+            groupJid,
+            reason: runtimePolicy.reason,
+        })
+        return { sent: false, mode: "silent", reason: runtimePolicy.reason }
+    }
+    const gatedOptions = { ...options, runtimePolicy }
+
     if (options.disableInteractive !== true) {
         // Primary path: the Native Flow is wrapped inside viewOnceMessage with
         // device metadata. This mirrors the structure used by modern button
         // builders so WhatsApp mobile and WhatsApp Web receive one consistent
         // single-select menu payload.
         try {
-            const generated = await sendHarukaStyleNativeFlowMenu(sock, groupJid, options)
+            const generated = await sendHarukaStyleNativeFlowMenu(sock, groupJid, gatedOptions)
             console.log("[GROUP MENU] Haruka-style Native Flow terkirim", {
                 groupJid,
                 messageId: generated?.key?.id || "-",
@@ -699,7 +757,7 @@ async function sendInteractiveMenu(sock, groupJid, options = {}) {
         }
 
         try {
-            await sendLegacyListMenu(sock, groupJid, options)
+            await sendLegacyListMenu(sock, groupJid, gatedOptions)
             return { sent: true, mode: "list-message" }
         } catch (error) {
             console.log("[GROUP MENU] ListMessage gagal, pakai fallback teks", {
@@ -710,8 +768,8 @@ async function sendInteractiveMenu(sock, groupJid, options = {}) {
     }
 
     await sock.sendMessage(groupJid, {
-        text: String(options.fallbackText || buildFallbackMenuText(options.bodyText)),
-        mentions: unique(options.mentionedJid),
+        text: String(gatedOptions.fallbackText || buildFallbackMenuText(gatedOptions.bodyText)),
+        mentions: unique(gatedOptions.mentionedJid),
     })
     return { sent: true, mode: "text-fallback" }
 }
@@ -741,14 +799,22 @@ async function handleParticipantUpdate(sock, update = {}, context = {}) {
         return { handled: false, reason: "unsupported-action" }
     }
 
-    const groupRemoteControl = context.groupRemoteControl
-    if (groupRemoteControl?.isGroupBotEnabled && !groupRemoteControl.isGroupBotEnabled(groupJid)) {
-        return { handled: false, reason: "group-bot-off" }
-    }
+    const groupRemoteControl = context.groupRemoteControl || defaultGroupRemoteControl
     const featureName = action === "add" ? "welcome" : "goodbye"
-    if (groupRemoteControl?.isGroupFeatureEnabled && !groupRemoteControl.isGroupFeatureEnabled(groupJid, featureName)) {
-        return { handled: false, reason: `${featureName}-off` }
+
+    const runtimePolicy = await groupRuntimePolicy.resolveGroupRuntimePolicy(sock, groupJid, {
+        groupRemoteControl,
+        featureName,
+        extraIdentityCandidates: context.extraIdentityCandidates,
+    })
+    if (!runtimePolicy.allowed) {
+        console.log(`[GROUP ${featureName.toUpperCase()}] Skip oleh runtime policy`, {
+            groupJid,
+            reason: runtimePolicy.reason,
+        })
+        return { handled: false, reason: runtimePolicy.reason }
     }
+    const metadata = runtimePolicy.metadata
 
     pruneRecentEvents()
     const eventKey = makeEventKey({ ...update, participants: flattenParticipantJids(update?.participants) })
@@ -758,22 +824,6 @@ async function handleParticipantUpdate(sock, update = {}, context = {}) {
     }
 
     if (EVENT_DELAY_MS > 0 && context.skipDelay !== true) await delay(EVENT_DELAY_MS)
-
-    let metadata
-    try {
-        metadata = await sock.groupMetadata(groupJid)
-    } catch (error) {
-        console.log(`[GROUP ${featureName.toUpperCase()}] Gagal membaca metadata`, {
-            groupJid,
-            error: String(error?.message || error).slice(0, 240),
-        })
-        return { handled: false, reason: "metadata-error" }
-    }
-
-    if (action === "add" && !isBotAdmin(metadata, sock)) {
-        console.log("[GROUP WELCOME] Skip karena bot bukan admin", { groupJid })
-        return { handled: false, reason: "bot-not-admin" }
-    }
 
     const botUsers = new Set(getBotIdentityCandidates(sock).map(jidUser).filter(Boolean))
     const participants = flattenParticipantJids(update?.participants).filter(jid => (
@@ -800,8 +850,12 @@ async function handleParticipantUpdate(sock, update = {}, context = {}) {
         group: metadata?.subject || "grup ini",
         memberCount,
     })
-    const menuEnabled = !groupRemoteControl?.isGroupFeatureEnabled
-        || groupRemoteControl.isGroupFeatureEnabled(groupJid, "groupMenu")
+    const menuPolicy = await groupRuntimePolicy.resolveGroupRuntimePolicy(sock, groupJid, {
+        groupRemoteControl,
+        featureName: "groupMenu",
+        metadata,
+    })
+    const menuEnabled = menuPolicy.allowed
 
     if (menuEnabled) {
         const sent = await sendInteractiveMenu(sock, groupJid, {
@@ -810,6 +864,8 @@ async function handleParticipantUpdate(sock, update = {}, context = {}) {
             footer: "Baca aturan • Kenalan • Nikmati kebersamaan",
             mentionedJid,
             disableInteractive: context.disableInteractive,
+            groupRemoteControl,
+            runtimePolicy: menuPolicy,
         })
         return { handled: true, reason: "welcome-sent", mode: sent.mode, participants: mentionedJid }
     }
@@ -831,7 +887,7 @@ function installGroupWelcome(sock, context = {}) {
     sock.ev.on("group-participants.update", listener)
     sock.__groupWelcomeInstalled = true
     sock.__groupWelcomeListener = listener
-    console.log("[GROUP LIFECYCLE] Welcome, goodbye, menu, dan kick-sticker aktif")
+    console.log("[GROUP LIFECYCLE] Handler terpasang; output menunggu Group Bot ON + verifikasi admin")
     return true
 }
 
@@ -877,22 +933,31 @@ function buildGamesText() {
     ].join("\n")
 }
 
-function formatFeatureStatus(groupJid, groupRemoteControl, botAdmin) {
+function formatFeatureStatus(groupJid, groupRemoteControl, policy = {}) {
     const effective = groupRemoteControl?.getEffectiveGroupConfig?.(groupJid)
     const feature = name => !groupRemoteControl?.isGroupFeatureEnabled
-        || groupRemoteControl.isGroupFeatureEnabled(groupJid, name)
+        || groupRemoteControl.isGroupFeatureEnabled(groupJid, name, policy || {})
     return [
         "👥 *STATUS FITUR GRUP*",
         "",
-        `Bot Grup: ${effective?.botEnabled === false ? "OFF" : "ON"}`,
-        `Bot Admin: ${botAdmin ? "YA" : "TIDAK"}`,
-        `Welcome: ${feature("welcome") ? "ON" : "OFF"}`,
-        `Goodbye: ${feature("goodbye") ? "ON" : "OFF"}`,
-        `Menu Interaktif: ${feature("groupMenu") ? "ON" : "OFF"}`,
-        `Kick Sticker: ${feature("kickSticker") ? "ON" : "OFF"}`,
-        `Anti Kasar: ${feature("antiToxic") ? "ON" : "OFF"}`,
-        `Sticker Safety: ${feature("stickerSafety") ? "ON" : "OFF"}`,
-        `Downloader Command: ${feature("downloader") ? "ON" : "OFF"}`,
+        `Bot Admin: ${policy.metadataAvailable ? (policy.botAdmin ? "YA" : "TIDAK") : "TIDAK DIKETAHUI"}`,
+        `Group Bot Config: ${effective?.botConfig === "DEFAULT" ? "DEFAULT (OFF)" : (effective?.botConfig || "DEFAULT (OFF)")}`,
+        `Effective Group Bot: ${policy.effectiveBotEnabled ? "ON" : "OFF"}`,
+        `Bot Management Access: ${policy.managementAllowed ? "ON (BOT ADMIN)" : "OFF"}`,
+        `Reason: ${policy.effectiveBotEnabled ? (policy.managementAllowed ? "OWNER ENABLED + BOT ADMIN" : "ORDINARY FEATURES ONLY") : String(policy.reason || "runtime-policy-unavailable").toUpperCase()}`,
+        `Welcome: ${policy.effectiveBotEnabled && feature("welcome") ? "ON" : "OFF"}`,
+        `Goodbye: ${policy.effectiveBotEnabled && feature("goodbye") ? "ON" : "OFF"}`,
+        `Menu Interaktif: ${policy.effectiveBotEnabled && feature("groupMenu") ? "ON" : "OFF"}`,
+        `Kick Sticker: ${policy.effectiveBotEnabled && feature("kickSticker") ? "ON" : "OFF"}`,
+        `Anti Kasar: ${policy.effectiveBotEnabled && feature("antiToxic") ? "ON" : "OFF"}`,
+        `Sticker Safety: ${policy.effectiveBotEnabled && feature("stickerSafety") ? "ON" : "OFF"}`,
+        `Downloader Command: ${policy.effectiveBotEnabled && feature("downloader") ? "ON" : "OFF"}`,
+        `Group Utilities: ${policy.effectiveBotEnabled && feature("groupUtilities") ? "ON" : "OFF"}`,
+        `Group Schedule: ${policy.effectiveBotEnabled && feature("groupSchedule") ? "ON" : "OFF"}`,
+        `Group Moderation: ${policy.effectiveBotEnabled && feature("groupModeration") ? "ON" : "OFF"}`,
+        `Group Attendance: ${policy.effectiveBotEnabled && feature("groupAttendance") ? "ON" : "OFF"}`,
+        `Slowmode Feature: ${policy.effectiveBotEnabled && feature("slowmode") ? "ON" : "OFF"}`,
+        `Anti-Spam Feature: ${policy.effectiveBotEnabled && feature("antiSpam") ? "ON" : "OFF"}`,
         "Menu Build: V1.4.0",
     ].join("\n")
 }
@@ -960,15 +1025,42 @@ async function handleGroupWelcomeCommand(sock, msg, context = {}) {
     if (compact === ".goodbyetest") text = ".goodbye test"
     if (compact === ".kickstickerstatus") text = ".kicksticker status"
     const lower = text.toLowerCase()
-    const commands = [".welcome", ".goodbye", ".kicksticker", ".kickinfo", ".kick", ".ping", ".groupmenu", ".menu", ".help", ".groupinfo", ".rules", ".adminlist", ".fiturgrup", ".tourlinfo", ".stikerinfo", ".pdfinfo", ".games", ".quiz", ".jawab", ".tebakangka", ".tebak", ".coinflip", ".roll", ".truth", ".dare", ".suit"]
+    const commands = [".welcome", ".goodbye", ".kicksticker", ".kickinfo", ".kick", ".ping", ".id", ".groupmenu", ".menu", ".help", ".groupinfo", ".rules", ".adminlist", ".fiturgrup", ".tourlinfo", ".stikerinfo", ".pdfinfo", ".games", ".quiz", ".jawab", ".tebakangka", ".tebak", ".coinflip", ".roll", ".truth", ".dare", ".suit"]
     if (!commands.some(command => lower === command || lower.startsWith(`${command} `))) return false
 
-    const groupRemoteControl = context.groupRemoteControl
+    const groupRemoteControl = context.groupRemoteControl || defaultGroupRemoteControl
     const senderJid = normalizeJid(context.senderJid || context.sender || msg?.key?.participant)
     const canControlOwner = Boolean(context.canControlOwner || context.isOwner)
+    if (msg?.key?.fromMe) rememberBotIdentityCandidates(sock, msg)
+
+    const runtimePolicy = await groupRuntimePolicy.resolveGroupRuntimePolicy(sock, groupJid, {
+        groupRemoteControl,
+        extraIdentityCandidates: msg?.key?.fromMe
+            ? [msg?.key?.participant, msg?.key?.participantAlt, msg?.participant, msg?.participantAlt]
+            : [],
+    })
+    if (!runtimePolicy.allowed) {
+        console.log("[GROUP COMMAND GATE] Command grup dibuat silent", {
+            groupJid,
+            command: lower.split(/\s+/)[0],
+            reason: runtimePolicy.reason,
+        })
+        return true
+    }
+    let metadata = runtimePolicy.metadata
+
+    if (lower === ".id") {
+        const idText = `ID Grup: ${groupJid}`
+        try {
+            await sock.sendMessage(groupJid, { text: idText, edit: { ...msg.key, remoteJid: groupJid } })
+        } catch {
+            await sock.sendMessage(groupJid, { text: idText }, { quoted: msg })
+        }
+        return true
+    }
 
     if (lower === ".menu" || lower === ".groupmenu" || lower === ".help") {
-        if (groupRemoteControl?.isGroupFeatureEnabled && !groupRemoteControl.isGroupFeatureEnabled(groupJid, "groupMenu")) {
+        if (groupRemoteControl?.isGroupFeatureEnabled && !groupRemoteControl.isGroupFeatureEnabled(groupJid, "groupMenu", runtimePolicy)) {
             await sock.sendMessage(groupJid, { text: "Menu interaktif sedang dinonaktifkan untuk grup ini." })
             return true
         }
@@ -977,6 +1069,8 @@ async function handleGroupWelcomeCommand(sock, msg, context = {}) {
             bodyText: "Akses cepat seluruh fitur grup dalam satu tempat.",
             footer: "Pilih kategori dan jalankan command tanpa mengetik manual",
             quoted: msg,
+            groupRemoteControl,
+            runtimePolicy,
         })
         console.log("[GROUP MENU] Command selesai", {
             groupJid,
@@ -996,9 +1090,8 @@ async function handleGroupWelcomeCommand(sock, msg, context = {}) {
         return true
     }
 
-    let metadata = null
     if (lower === ".groupinfo" || lower === ".rules" || lower === ".adminlist" || lower === ".fiturgrup") {
-        metadata = await sock.groupMetadata(groupJid).catch(() => null)
+        metadata = runtimePolicy.metadata
     }
 
     if (lower === ".groupinfo") {
@@ -1040,7 +1133,7 @@ async function handleGroupWelcomeCommand(sock, msg, context = {}) {
 
     if (lower === ".fiturgrup") {
         await sock.sendMessage(groupJid, {
-            text: formatFeatureStatus(groupJid, groupRemoteControl, Boolean(metadata && isBotAdmin(metadata, sock))),
+            text: formatFeatureStatus(groupJid, groupRemoteControl, runtimePolicy),
         })
         return true
     }
@@ -1261,7 +1354,7 @@ Hasil: *${verdict}*`,
                 text: [
                     "👋 *GOODBYE STATUS*",
                     "",
-                    `Goodbye: ${!groupRemoteControl?.isGroupFeatureEnabled || groupRemoteControl.isGroupFeatureEnabled(groupJid, "goodbye") ? "ON" : "OFF"}`,
+                    `Goodbye: ${!groupRemoteControl?.isGroupFeatureEnabled || groupRemoteControl.isGroupFeatureEnabled(groupJid, "goodbye", runtimePolicy) ? "ON" : "OFF"}`,
                     `Template: ${config.goodbyeCustom ? "CUSTOM" : "DEFAULT"}`,
                     "",
                     config.goodbyeTemplate,
@@ -1332,7 +1425,7 @@ Hasil: *${verdict}*`,
                 text: [
                     "🥾 *KICK STICKER STATUS*",
                     "",
-                    `Fitur: ${!groupRemoteControl?.isGroupFeatureEnabled || groupRemoteControl.isGroupFeatureEnabled(groupJid, "kickSticker") ? "ON" : "OFF"}`,
+                    `Fitur: ${!groupRemoteControl?.isGroupFeatureEnabled || groupRemoteControl.isGroupFeatureEnabled(groupJid, "kickSticker", runtimePolicy) ? "ON" : "OFF"}`,
                     `Stiker: ${config.kickStickerConfigured ? "SUDAH DIATUR" : "BELUM DIATUR"}`,
                     "",
                     "Atur dengan reply stiker lalu `.kicksticker set`.",
@@ -1395,7 +1488,7 @@ Hasil: *${verdict}*`,
             await sock.sendMessage(groupJid, { text: "Bot harus menjadi admin agar dapat mengeluarkan anggota." })
             return true
         }
-        if (groupRemoteControl?.isGroupFeatureEnabled && !groupRemoteControl.isGroupFeatureEnabled(groupJid, "kickSticker")) {
+        if (groupRemoteControl?.isGroupFeatureEnabled && !groupRemoteControl.isGroupFeatureEnabled(groupJid, "kickSticker", runtimePolicy)) {
             await sock.sendMessage(groupJid, { text: "Kick sticker sedang OFF. Aktifkan dengan `.kicksticker on`." })
             return true
         }
@@ -1462,8 +1555,8 @@ Hasil: *${verdict}*`,
                 "👋 *WELCOME STATUS*",
                 "",
                 `Bot Admin: ${metadata && isBotAdmin(metadata, sock) ? "YA" : "TIDAK"}`,
-                `Welcome: ${!groupRemoteControl?.isGroupFeatureEnabled || groupRemoteControl.isGroupFeatureEnabled(groupJid, "welcome") ? "ON" : "OFF"}`,
-                `Menu: ${!groupRemoteControl?.isGroupFeatureEnabled || groupRemoteControl.isGroupFeatureEnabled(groupJid, "groupMenu") ? "ON" : "OFF"}`,
+                `Welcome: ${!groupRemoteControl?.isGroupFeatureEnabled || groupRemoteControl.isGroupFeatureEnabled(groupJid, "welcome", runtimePolicy) ? "ON" : "OFF"}`,
+                `Menu: ${!groupRemoteControl?.isGroupFeatureEnabled || groupRemoteControl.isGroupFeatureEnabled(groupJid, "groupMenu", runtimePolicy) ? "ON" : "OFF"}`,
                 `Template: ${config.custom ? "CUSTOM" : "DEFAULT"}`,
                 "",
                 config.template,

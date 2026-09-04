@@ -125,7 +125,7 @@ async function buildHealthText(services = {}) {
         `Last Notification: ${formatTime(notification?.lastNotificationAt)}`,
         `Last Notification Result: ${notification?.lastNotificationResult || "UNKNOWN"}`,
         "",
-        `Group Inbound Policy: ${policy?.mode || "COMMANDS & FEATURES (NO AUTO LINK / AUTO REPLY)"}`,
+        `Group Inbound Policy: ${policy?.mode || "DEFAULT OFF; MANAGEMENT ADMIN-GATED"}`,
         "Group Detect Link: OFF",
         "Private Detect Link: ON",
         `Group Downloader Commands: ${policy?.groupDownloader === false ? "OFF" : "ON"}`,

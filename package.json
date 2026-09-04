@@ -1,12 +1,18 @@
 {
-  "name": "fahri wa-userbot",
+  "name": "userbot",
   "version": "1.0.0",
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
     "postinstall": "node scripts/patch-baileys-group-retry.js",
     "start": "node index.js",
+    "pm2:watch": "pm2 startOrReload ecosystem.config.cjs --update-env",
+    "test:source-watch": "node scripts/test-source-watchdog.js",
     "test:auto-reply-scope": "node scripts/test-auto-reply-private-only.js",
+    "test:call-first-voice": "node scripts/test-call-handler-first-voice.js",
+    "test:tts": "node scripts/test-text-to-speech.js",
+    "test:transkrip": "node scripts/test-audio-transcription.js",
+    "test:viewonce-sender": "node scripts/test-viewonce-sender-consistency.js",
     "test:rate-limit": "node scripts/test-command-rate-limit.js"
   },
   "dependencies": {

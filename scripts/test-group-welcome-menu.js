@@ -50,12 +50,20 @@ async function run() {
     assert.ok(menuRows.some(row => row.id === ".rules"))
     assert.ok(menuRows.some(row => row.id === ".fiturgrup"))
     assert.ok(menuRows.some(row => row.id === ".tourlinfo"))
+    assert.ok(menuRows.some(row => row.id === ".transkrip"))
     assert.ok(menuRows.some(row => row.id === ".quiz"))
     assert.ok(menuRows.some(row => row.id === ".tebakangka"))
     assert.ok(menuRows.some(row => row.id === ".suit"))
     assert.ok(menuRows.some(row => row.id === ".ping"))
     assert.ok(menuRows.some(row => row.id === ".goodbye status"))
     assert.ok(menuRows.some(row => row.id === ".kicksticker status"))
+    assert.ok(menuRows.some(row => row.id === ".gcopen"))
+    assert.ok(menuRows.some(row => row.id === ".gcschedule status"))
+    assert.ok(menuRows.some(row => row.id === ".setppgc"))
+    assert.ok(menuRows.some(row => row.id === ".listwarn"))
+    assert.ok(menuRows.some(row => row.id === ".slowmode status"))
+    assert.ok(menuRows.some(row => row.id === ".antispam status"))
+    assert.ok(menuRows.some(row => row.id === ".mulaiabsen Absensi Grup"))
     assert.ok(!menuRows.some(row => row.id === ".menuteks" || row.id === ".menutext"))
     assert.ok(!menuRows.some(row => row.id === ".help" || /help menu/i.test(row.title || "")))
 
@@ -65,6 +73,12 @@ async function run() {
     assert.strictEqual(groupRemoteControl.DEFAULT_FEATURES.groupMenu, true)
     assert.strictEqual(groupRemoteControl.DEFAULT_FEATURES.goodbye, true)
     assert.strictEqual(groupRemoteControl.DEFAULT_FEATURES.kickSticker, true)
+    assert.strictEqual(groupRemoteControl.DEFAULT_FEATURES.groupUtilities, true)
+    assert.strictEqual(groupRemoteControl.DEFAULT_FEATURES.groupSchedule, true)
+    assert.strictEqual(groupRemoteControl.DEFAULT_FEATURES.groupModeration, true)
+    assert.strictEqual(groupRemoteControl.DEFAULT_FEATURES.groupAttendance, true)
+    assert.strictEqual(groupRemoteControl.DEFAULT_FEATURES.slowmode, true)
+    assert.strictEqual(groupRemoteControl.DEFAULT_FEATURES.antiSpam, true)
 
     const groupJid = "120363000000000000@g.us"
     const newMember = "628222222222@s.whatsapp.net"
@@ -195,6 +209,7 @@ async function run() {
     }
     const mobileMenuSock = {
         user: { id: botJid },
+        groupMetadata: async () => metadataAdmin,
         relayMessage: async (...args) => {
             relayMessages.push(args)
         },
@@ -204,6 +219,11 @@ async function run() {
     }
     const mobileMenuResult = await groupWelcome.sendInteractiveMenu(mobileMenuSock, groupJid, {
         baileys: fakeBaileys,
+        groupRemoteControl: {
+            isGroupBotEnabled: () => true,
+            isGroupFeatureEnabled: () => true,
+            getEffectiveGroupConfig: () => ({ botEnabled: true, configuredBotEnabled: true, features: { groupMenu: true } }),
+        },
     })
     assert.strictEqual(mobileMenuResult.mode, "haruka-native-flow")
     assert.strictEqual(generatedPayloads.length, 1)
@@ -259,15 +279,18 @@ async function run() {
     assert.ok(indexSource.includes("groupWelcome.extractInteractiveSelection"))
     assert.ok(indexSource.includes("groupWelcome.handleGroupWelcomeCommand"))
     assert.ok(indexSource.includes("groupWelcome.buildPingText(msg)"))
-    assert.ok(indexSource.includes('handler: "groupAdminGate"'))
-    assert.ok(indexSource.includes('reason: "bot-not-admin"'))
+    assert.ok(indexSource.includes('handler: "groupBotGate"'))
     assert.ok(indexSource.includes("groupWelcome.rememberBotIdentityCandidates(sock, msg)"))
-    assert.ok(indexSource.includes("groupWelcome.isBotAdmin(inboundGroupMetadata, sock, selfIdentityCandidates)"))
-    const gateIndex = indexSource.indexOf("groupWelcome.isBotAdmin(inboundGroupMetadata, sock, selfIdentityCandidates)")
+    assert.ok(indexSource.includes("handleInGroupBotControlCommand(sock, msg"))
+    assert.ok(indexSource.includes("groupRuntimePolicy.resolveGroupRuntimePolicy(sock, from"))
+    assert.ok(indexSource.includes("reason: inboundGroupPolicy.reason"))
+    const gateIndex = indexSource.indexOf("groupRuntimePolicy.resolveGroupRuntimePolicy(sock, from")
+    const groupBotControlIndex = indexSource.indexOf("handleInGroupBotControlCommand(sock, msg")
     const stickerSafetyIndex = indexSource.indexOf("stickerSafetyCommandHandled")
     const antiToxicIndex = indexSource.indexOf("shouldRunAntiToxicForMessage")
     assert.ok(gateIndex > 0 && gateIndex < stickerSafetyIndex)
     assert.ok(gateIndex > 0 && gateIndex < antiToxicIndex)
+    assert.ok(groupBotControlIndex > 0 && groupBotControlIndex < gateIndex)
 
     console.log("PASS test-group-welcome-menu")
 }

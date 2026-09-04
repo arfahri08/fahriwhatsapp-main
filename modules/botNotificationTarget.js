@@ -150,7 +150,7 @@ async function handleBotNotificationCommand(sock, msg, context = {}) {
         type = "active-test"
         testContent = {
             text: [
-                "✅ *USERBOT FAHRI AKTIF*",
+                "✅ *USERBOT AKTIF*",
                 "",
                 "Bot sudah tersambung ke WhatsApp.",
                 `Waktu: ${formatJakartaTime()}`,

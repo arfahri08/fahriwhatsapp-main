@@ -1,21 +1,180 @@
 {
-  "version": 1,
-  "global": {
-    "enabled": true,
-    "debug": false
-  },
-  "groups": {},
-  "stats": {
-    "totalEditEvents": 0,
-    "processedEdits": 0,
-    "toxicEdits": 0,
-    "duplicateEdits": 0,
-    "skippedPrivate": 0,
-    "skippedBotOff": 0,
-    "skippedAntiToxicOff": 0,
-    "lastEventAt": null,
-    "lastToxicEditAt": null
-  },
-  "recent": [],
-  "dedupe": []
+    "version":  1,
+    "global":  {
+                   "enabled":  true,
+                   "debug":  false
+               },
+    "groups":  {
+
+               },
+    "stats":  {
+                  "totalEditEvents":  14,
+                  "processedEdits":  0,
+                  "toxicEdits":  0,
+                  "duplicateEdits":  10,
+                  "skippedPrivate":  2,
+                  "skippedBotOff":  2,
+                  "skippedAntiToxicOff":  0,
+                  "lastEventAt":  1785837375847,
+                  "lastToxicEditAt":  null
+              },
+    "recent":  [
+                   {
+                       "groupJid":  "120363999999999999@g.us",
+                       "messageId":  "GROUP-ORIGINAL-1",
+                       "senderJid":  "6281111111111@s.whatsapp.net",
+                       "editedTextHash":  "e68ba8c324fa5627d8cc72167735ad4e86ef231c1162658231a20d0b7ebc1ec8",
+                       "result":  "logged-bot-off",
+                       "matchedWordsMasked":  [
+
+                                              ],
+                       "editedAt":  101000000000
+                   },
+                   {
+                       "groupJid":  "6282222222222@s.whatsapp.net",
+                       "messageId":  "PM-ORIGINAL-1",
+                       "senderJid":  "6282222222222@s.whatsapp.net",
+                       "editedTextHash":  "6c026d715a8cf0fadb2c289bfd591c84c9f07a565f1d4ee04e6378f07e3c29ce",
+                       "result":  "logged-private",
+                       "matchedWordsMasked":  [
+
+                                              ],
+                       "editedAt":  201000000000
+                   },
+                   {
+                       "groupJid":  "120363999999999999@g.us",
+                       "messageId":  "GROUP-ORIGINAL-1",
+                       "senderJid":  "6281111111111@s.whatsapp.net",
+                       "editedTextHash":  "e68ba8c324fa5627d8cc72167735ad4e86ef231c1162658231a20d0b7ebc1ec8",
+                       "result":  "duplicate",
+                       "matchedWordsMasked":  [
+
+                                              ],
+                       "editedAt":  101000000000
+                   },
+                   {
+                       "groupJid":  "6282222222222@s.whatsapp.net",
+                       "messageId":  "PM-ORIGINAL-1",
+                       "senderJid":  "6282222222222@s.whatsapp.net",
+                       "editedTextHash":  "6c026d715a8cf0fadb2c289bfd591c84c9f07a565f1d4ee04e6378f07e3c29ce",
+                       "result":  "duplicate",
+                       "matchedWordsMasked":  [
+
+                                              ],
+                       "editedAt":  201000000000
+                   },
+                   {
+                       "groupJid":  "120363999999999999@g.us",
+                       "messageId":  "GROUP-ORIGINAL-1",
+                       "senderJid":  "6281111111111@s.whatsapp.net",
+                       "editedTextHash":  "e68ba8c324fa5627d8cc72167735ad4e86ef231c1162658231a20d0b7ebc1ec8",
+                       "result":  "logged-bot-off",
+                       "matchedWordsMasked":  [
+
+                                              ],
+                       "editedAt":  101000000000
+                   },
+                   {
+                       "groupJid":  "6282222222222@s.whatsapp.net",
+                       "messageId":  "PM-ORIGINAL-1",
+                       "senderJid":  "6282222222222@s.whatsapp.net",
+                       "editedTextHash":  "6c026d715a8cf0fadb2c289bfd591c84c9f07a565f1d4ee04e6378f07e3c29ce",
+                       "result":  "logged-private",
+                       "matchedWordsMasked":  [
+
+                                              ],
+                       "editedAt":  201000000000
+                   },
+                   {
+                       "groupJid":  "120363999999999999@g.us",
+                       "messageId":  "GROUP-ORIGINAL-1",
+                       "senderJid":  "6281111111111@s.whatsapp.net",
+                       "editedTextHash":  "e68ba8c324fa5627d8cc72167735ad4e86ef231c1162658231a20d0b7ebc1ec8",
+                       "result":  "duplicate",
+                       "matchedWordsMasked":  [
+
+                                              ],
+                       "editedAt":  101000000000
+                   },
+                   {
+                       "groupJid":  "6282222222222@s.whatsapp.net",
+                       "messageId":  "PM-ORIGINAL-1",
+                       "senderJid":  "6282222222222@s.whatsapp.net",
+                       "editedTextHash":  "6c026d715a8cf0fadb2c289bfd591c84c9f07a565f1d4ee04e6378f07e3c29ce",
+                       "result":  "duplicate",
+                       "matchedWordsMasked":  [
+
+                                              ],
+                       "editedAt":  201000000000
+                   },
+                   {
+                       "groupJid":  "120363999999999999@g.us",
+                       "messageId":  "GROUP-ORIGINAL-1",
+                       "senderJid":  "6281111111111@s.whatsapp.net",
+                       "editedTextHash":  "e68ba8c324fa5627d8cc72167735ad4e86ef231c1162658231a20d0b7ebc1ec8",
+                       "result":  "duplicate",
+                       "matchedWordsMasked":  [
+
+                                              ],
+                       "editedAt":  101000000000
+                   },
+                   {
+                       "groupJid":  "6282222222222@s.whatsapp.net",
+                       "messageId":  "PM-ORIGINAL-1",
+                       "senderJid":  "6282222222222@s.whatsapp.net",
+                       "editedTextHash":  "6c026d715a8cf0fadb2c289bfd591c84c9f07a565f1d4ee04e6378f07e3c29ce",
+                       "result":  "duplicate",
+                       "matchedWordsMasked":  [
+
+                                              ],
+                       "editedAt":  201000000000
+                   },
+                   {
+                       "groupJid":  "120363999999999999@g.us",
+                       "messageId":  "GROUP-ORIGINAL-1",
+                       "senderJid":  "6281111111111@s.whatsapp.net",
+                       "editedTextHash":  "e68ba8c324fa5627d8cc72167735ad4e86ef231c1162658231a20d0b7ebc1ec8",
+                       "result":  "duplicate",
+                       "matchedWordsMasked":  [
+
+                                              ],
+                       "editedAt":  101000000000
+                   },
+                   {
+                       "groupJid":  "6282222222222@s.whatsapp.net",
+                       "messageId":  "PM-ORIGINAL-1",
+                       "senderJid":  "6282222222222@s.whatsapp.net",
+                       "editedTextHash":  "6c026d715a8cf0fadb2c289bfd591c84c9f07a565f1d4ee04e6378f07e3c29ce",
+                       "result":  "duplicate",
+                       "matchedWordsMasked":  [
+
+                                              ],
+                       "editedAt":  201000000000
+                   },
+                   {
+                       "groupJid":  "120363999999999999@g.us",
+                       "messageId":  "GROUP-ORIGINAL-1",
+                       "senderJid":  "6281111111111@s.whatsapp.net",
+                       "editedTextHash":  "e68ba8c324fa5627d8cc72167735ad4e86ef231c1162658231a20d0b7ebc1ec8",
+                       "result":  "duplicate",
+                       "matchedWordsMasked":  [
+
+                                              ],
+                       "editedAt":  101000000000
+                   },
+                   {
+                       "groupJid":  "6282222222222@s.whatsapp.net",
+                       "messageId":  "PM-ORIGINAL-1",
+                       "senderJid":  "6282222222222@s.whatsapp.net",
+                       "editedTextHash":  "6c026d715a8cf0fadb2c289bfd591c84c9f07a565f1d4ee04e6378f07e3c29ce",
+                       "result":  "duplicate",
+                       "matchedWordsMasked":  [
+
+                                              ],
+                       "editedAt":  201000000000
+                   }
+               ],
+    "dedupe":  [
+
+               ]
 }

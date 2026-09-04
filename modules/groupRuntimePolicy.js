@@ -2,6 +2,25 @@
 
 const learnedBotIdentities = new Set()
 const MAX_LEARNED_BOT_IDENTITIES = 32
+const ADMIN_REQUIRED_FEATURES = new Set([
+    "antiToxic",
+    "editGuardian",
+    "broadcast",
+    "stickerSafety",
+    "stickerText",
+    "stickerNsfw",
+    "welcome",
+    "goodbye",
+    "kickSticker",
+    "warning",
+    "groupUtilities",
+    "groupSchedule",
+    "groupModeration",
+    "groupAttendance",
+    "slowmode",
+    "antiSpam",
+    "nsfwModeration",
+])
 
 function normalizeJid(value) {
     return String(value || "").trim().toLowerCase()
@@ -9,6 +28,10 @@ function normalizeJid(value) {
 
 function isGroupJid(value) {
     return normalizeJid(value).endsWith("@g.us")
+}
+
+function isAdminRequiredFeature(featureName) {
+    return ADMIN_REQUIRED_FEATURES.has(String(featureName || "").trim())
 }
 
 function jidUser(value) {
@@ -98,9 +121,9 @@ function getConfiguredGroupState(groupRemoteControl, groupJid, featureName = "")
         if (typeof config?.botEnabled === "boolean") configuredBotEnabled = config.botEnabled
         else {
             try {
-                configuredBotEnabled = groupRemoteControl?.isGroupBotEnabled?.(groupJid) !== false
+                configuredBotEnabled = groupRemoteControl?.isGroupBotEnabled?.(groupJid) === true
             } catch {
-                configuredBotEnabled = true
+                configuredBotEnabled = false
             }
         }
     }
@@ -130,6 +153,8 @@ async function resolveGroupRuntimePolicy(sock, groupJid, options = {}) {
     const jid = normalizeJid(groupJid)
     const featureName = String(options.featureName || options.feature || "").trim()
     const configured = getConfiguredGroupState(options.groupRemoteControl, jid, featureName)
+    const adminRequired = options.requireBotAdmin === true
+        || isAdminRequiredFeature(featureName)
     if (!isGroupJid(jid)) {
         return {
             allowed: false,
@@ -140,6 +165,8 @@ async function resolveGroupRuntimePolicy(sock, groupJid, options = {}) {
             metadata: null,
             metadataAvailable: false,
             botAdmin: false,
+            adminRequired,
+            managementAllowed: false,
             effectiveBotEnabled: false,
             effectiveFeatureEnabled: false,
         }
@@ -164,21 +191,21 @@ async function resolveGroupRuntimePolicy(sock, groupJid, options = {}) {
 
     const metadataAvailable = Boolean(metadata && Array.isArray(metadata.participants))
     const botAdmin = metadataAvailable && isBotAdmin(metadata, sock, options.extraIdentityCandidates)
-    const effectiveBotEnabled = Boolean(
-        metadataAvailable
-        && botAdmin
-        && configured.configuredBotEnabled
-    )
+    // Group Bot ON adalah izin owner per grup. Status admin hanya menjadi
+    // syarat untuk fitur pengelolaan yang memang membutuhkan hak admin.
+    const effectiveBotEnabled = configured.configuredBotEnabled === true
+    const managementAllowed = Boolean(effectiveBotEnabled && metadataAvailable && botAdmin)
     const effectiveFeatureEnabled = Boolean(
         effectiveBotEnabled
         && (!featureName || configured.configuredFeatureEnabled)
+        && (!adminRequired || managementAllowed)
     )
 
     let reason = "allowed"
-    if (!metadataAvailable) reason = "metadata-unavailable"
-    else if (!botAdmin) reason = "bot-not-admin"
-    else if (!configured.configuredBotEnabled) reason = "group-bot-off"
+    if (!configured.configuredBotEnabled) reason = "group-bot-off"
     else if (featureName && !configured.configuredFeatureEnabled) reason = `${featureName}-off`
+    else if (adminRequired && !metadataAvailable) reason = "metadata-unavailable"
+    else if (adminRequired && !botAdmin) reason = "bot-not-admin"
 
     return {
         allowed: effectiveFeatureEnabled,
@@ -190,15 +217,19 @@ async function resolveGroupRuntimePolicy(sock, groupJid, options = {}) {
         metadataAvailable,
         metadataError,
         botAdmin,
+        adminRequired,
+        managementAllowed,
         effectiveBotEnabled,
         effectiveFeatureEnabled,
     }
 }
 
 module.exports = {
+    ADMIN_REQUIRED_FEATURES,
     getBotIdentityCandidates,
     getBotParticipant,
     isAdminParticipant,
+    isAdminRequiredFeature,
     isBotAdmin,
     isGroupJid,
     jidUser,

@@ -2,7 +2,14 @@
 
 const assert = require("assert")
 const crypto = require("crypto")
+const fs = require("fs")
+const os = require("os")
+const path = require("path")
 const { EventEmitter } = require("events")
+
+const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "secret-encrypted-edit-test-"))
+process.env.EDIT_TAP_TRACE_PATH = path.join(tempRoot, "editEventTrace.jsonl")
+
 const bridge = require("../modules/messageEditRuntimeBridge")
 const secretEdit = require("../modules/secretEncryptedEdit")
 
@@ -284,4 +291,11 @@ async function main() {
 main().catch(error => {
     console.error(error)
     process.exitCode = 1
+}).finally(() => {
+    bridge.disposeMessageEditRuntimeBridge()
+    const resolved = path.resolve(tempRoot)
+    const tempBase = path.resolve(os.tmpdir())
+    if (resolved.startsWith(`${tempBase}${path.sep}`)) {
+        fs.rmSync(resolved, { recursive: true, force: true })
+    }
 })

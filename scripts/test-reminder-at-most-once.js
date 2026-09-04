@@ -13,7 +13,7 @@ process.env.REMINDER_MEDIA_DIR = path.join(tempRoot, "media")
 
 fs.mkdirSync(process.env.REMINDER_MEDIA_DIR, { recursive: true })
 fs.writeFileSync(process.env.REMINDER_DATA_FILE, "[]\n", "utf8")
-const expectedHeader = "[REMINDER] *INI ADALAH PESAN OTOMATIS oleh USERBOT FAHRI*\n\n"
+const expectedHeader = "[REMINDER] *INI ADALAH PESAN OTOMATIS oleh USERBOT*\n\n"
 fs.writeFileSync(process.env.REMINDER_HEADER_FILE, expectedHeader, "utf8")
 
 const Module = require("module")

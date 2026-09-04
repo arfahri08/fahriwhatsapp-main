@@ -223,6 +223,21 @@ function resolveContactName(jid, fallbacks = []) {
     return ""
 }
 
+function resolveSavedContactName(jid) {
+    const normalizedJid = normalizeContactJid(jid)
+    const state = loadState()
+    const entry = normalizedJid ? state.contacts[normalizedJid] : null
+    if (entry?.savedName) return cleanName(entry.savedName)
+
+    const number = getJidNumber(normalizedJid)
+    if (!number) return ""
+    for (const [storedJid, storedEntry] of Object.entries(state.contacts || {})) {
+        if (getJidNumber(storedJid) !== number) continue
+        if (storedEntry?.savedName) return cleanName(storedEntry.savedName)
+    }
+    return ""
+}
+
 function disposeContactNameStore() {
     stateCache = null
     stateFileCache = ""
@@ -233,6 +248,7 @@ module.exports = {
     rememberContacts,
     rememberIncomingMessage,
     resolveContactName,
+    resolveSavedContactName,
     normalizeContactJid,
     getJidNumber,
     loadState,

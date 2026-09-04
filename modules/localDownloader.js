@@ -6,12 +6,13 @@ const path = require("path");
 const { spawn } = require("child_process");
 const { delay } = require("./delay");
 const messageCleaner = require("./messageCleaner");
+const { sendImageAlbum } = require("./mediaAlbum");
 
 const sessions = new Map();
 
 const CONFIG = {
     ytdlpBin: process.env.YTDLP_BIN || "yt-dlp",
-    tempDir: process.env.DOWNLOADER_TEMP_DIR || path.join(os.tmpdir(), "userbot-fahri-downloads"),
+    tempDir: process.env.DOWNLOADER_TEMP_DIR || path.join(os.tmpdir(), "userbot-downloads"),
     maxFiles: Number(process.env.DOWNLOADER_MAX_FILES || 10),
     maxMb: Number(process.env.DOWNLOADER_MAX_MB || 95),
     sessionTtlMs: 2 * 60 * 1000,
@@ -19,19 +20,154 @@ const CONFIG = {
 };
 
 const VIDEO_EXTENSIONS = new Set(["mp4", "mov", "mkv", "webm"]);
-const IMAGE_EXTENSIONS = new Set(["jpg", "jpeg", "png", "webp"]);
+const IMAGE_EXTENSIONS = new Set(["jpg", "jpeg", "png", "webp", "heic", "heif"]);
+const WHATSAPP_VIEWABLE_IMAGE_EXTENSIONS = new Set(["jpg", "jpeg", "png", "webp"]);
+const THREADS_BROWSER_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+];
 const AUDIO_EXTENSIONS = new Set(["mp3", "m4a", "opus", "ogg", "wav"]);
 const THREADS_CRAWLER_USER_AGENTS = [
     "facebookexternalhit/1.1",
     "Twitterbot/1.0",
     "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
 ];
+const THREADS_PAGE_USER_AGENTS = [...THREADS_BROWSER_USER_AGENTS, ...THREADS_CRAWLER_USER_AGENTS];
+const THREADS_VREDEN_ENDPOINT = "https://api.vreden.my.id/api/v1/download/threads?slof=1";
 
 if (!fs.existsSync(CONFIG.tempDir)) fs.mkdirSync(CONFIG.tempDir, { recursive: true });
 
+function extractUrls(text) {
+    const matches = String(text || "").match(/https?:\/\/[^\s<>"']+/gi) || [];
+    return matches
+        .map(url => url.replace(/[)>.,;!?]+$/g, ""))
+        .filter(Boolean);
+}
+
+function isTikTokHostname(hostname) {
+    const host = String(hostname || "").toLowerCase().replace(/\.$/, "");
+    return host === "tiktok.com" || host.endsWith(".tiktok.com");
+}
+
+function decodeNestedUrl(value) {
+    let current = String(value || "").trim();
+
+    for (let attempt = 0; attempt < 5 && current; attempt += 1) {
+        try {
+            const parsed = new URL(current);
+            if (/^https?:$/.test(parsed.protocol)) return parsed.toString();
+            return null;
+        } catch {}
+
+        try {
+            const decoded = decodeURIComponent(current);
+            if (decoded === current) break;
+            current = decoded;
+        } catch {
+            break;
+        }
+    }
+
+    return null;
+}
+
+function unwrapTikTokRedirectUrl(url) {
+    const original = String(url || "").trim();
+    let current = original;
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+        let parsed;
+        try {
+            parsed = new URL(current);
+        } catch {
+            return original;
+        }
+
+        if (!isTikTokHostname(parsed.hostname) || !/^\/login\/?$/i.test(parsed.pathname)) {
+            return parsed.toString();
+        }
+
+        const redirectValue = ["redirect_url", "redirect", "target", "url"]
+            .map(key => parsed.searchParams.get(key))
+            .find(Boolean);
+        const decoded = decodeNestedUrl(redirectValue);
+        if (!decoded) return original;
+
+        let redirect;
+        try {
+            redirect = new URL(decoded);
+        } catch {
+            return original;
+        }
+
+        // Jangan membuka redirect ke domain lain dari parameter URL yang dikirim pengguna.
+        if (!isTikTokHostname(redirect.hostname)) return original;
+        if (redirect.toString() === current) return current;
+        current = redirect.toString();
+    }
+
+    return current;
+}
+
+function getUnsupportedTikTokPageKind(url) {
+    try {
+        const parsed = new URL(unwrapTikTokRedirectUrl(url));
+        if (!isTikTokHostname(parsed.hostname)) return null;
+        if (/^\/minis(?:\/|$)/i.test(parsed.pathname)) return "minis";
+        if (/^\/login(?:\/|$)/i.test(parsed.pathname)) return "login";
+        return null;
+    } catch {
+        return null;
+    }
+}
+
+function isLikelyTikTokMediaUrl(url) {
+    try {
+        const parsed = new URL(unwrapTikTokRedirectUrl(url));
+        const host = parsed.hostname.toLowerCase();
+        if (host === "vm.tiktok.com" || host === "vt.tiktok.com") return true;
+        if (!isTikTokHostname(host)) return false;
+        return (
+            /^\/@[^/]+\/(?:video|photo)\/\d+/i.test(parsed.pathname) ||
+            /^\/(?:t|video|photo)\//i.test(parsed.pathname)
+        );
+    } catch {
+        return false;
+    }
+}
+
 function extractUrl(text) {
-    const match = text.match(/https?:\/\/[^\s]+/i);
-    return match ? match[0].replace(/[)>.,]+$/g, "") : null;
+    const urls = extractUrls(text);
+    if (urls.length === 0) return null;
+
+    const firstNormalized = unwrapTikTokRedirectUrl(urls[0]);
+    if (getUnsupportedTikTokPageKind(firstNormalized)) {
+        const mediaUrl = urls
+            .map(unwrapTikTokRedirectUrl)
+            .find(isLikelyTikTokMediaUrl);
+        if (mediaUrl) return mediaUrl;
+    }
+
+    return urls[0];
+}
+
+function extractQuotedText(message) {
+    let current = message || {};
+    for (let attempt = 0; attempt < 8 && current; attempt += 1) {
+        if (current.ephemeralMessage?.message) current = current.ephemeralMessage.message;
+        else if (current.viewOnceMessage?.message) current = current.viewOnceMessage.message;
+        else if (current.viewOnceMessageV2?.message) current = current.viewOnceMessageV2.message;
+        else break;
+    }
+
+    return String(
+        current?.conversation ||
+        current?.extendedTextMessage?.text ||
+        current?.imageMessage?.caption ||
+        current?.videoMessage?.caption ||
+        current?.documentMessage?.caption ||
+        ""
+    ).trim();
 }
 
 function isSpotifyUrl(url) {
@@ -54,6 +190,7 @@ function detectPlatform(text) {
     if (isSpotifyUrl(url)) return null;
     if (/tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com/i.test(url)) return "tiktok";
     if (/instagram\.com|instagr\.am/i.test(url)) return "instagram";
+    if (/facebook\.com|fb\.watch|fb\.com/i.test(url)) return "facebook";
     if (/threads\.(net|com)/i.test(url)) return "threads";
     if (/youtube\.com|youtu\.be|youtube-nocookie\.com/i.test(url)) return "youtube";
     return null;
@@ -63,10 +200,12 @@ function platformLabel(platform) {
     if (platform === "tiktok") return "TikTok";
     if (platform === "threads") return "Threads";
     if (platform === "youtube") return "YouTube";
+    if (platform === "facebook") return "Facebook";
     return "Instagram";
 }
 
 function normalizeDownloadUrl(url, platform) {
+    if (platform === "tiktok") return unwrapTikTokRedirectUrl(url);
     if (platform !== "threads") return url;
 
     try {
@@ -194,7 +333,7 @@ function runYtDlp(url, mode) {
     });
 }
 
-function fetchText(url, headers = {}, redirects = 0) {
+function fetchThreadsPage(url, headers = {}, redirects = 0) {
     return new Promise((resolve, reject) => {
         if (redirects > 5) {
             reject(new Error("Redirect terlalu banyak saat membuka Threads."));
@@ -214,7 +353,7 @@ function fetchText(url, headers = {}, redirects = 0) {
             const location = res.headers.location;
             if ([301, 302, 303, 307, 308].includes(res.statusCode) && location) {
                 res.resume();
-                fetchText(new URL(location, parsed).toString(), headers, redirects + 1).then(resolve).catch(reject);
+                fetchThreadsPage(new URL(location, parsed).toString(), headers, redirects + 1).then(resolve).catch(reject);
                 return;
             }
 
@@ -234,10 +373,69 @@ function fetchText(url, headers = {}, redirects = 0) {
                 }
                 chunks.push(chunk);
             });
-            res.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+            res.on("end", () => resolve({
+                html: Buffer.concat(chunks).toString("utf8"),
+                finalUrl: parsed.toString(),
+            }));
         });
 
         req.on("timeout", () => req.destroy(new Error("Timeout saat membuka Threads.")));
+        req.on("error", reject);
+    });
+}
+
+function fetchJson(url, headers = {}, redirects = 0) {
+    return new Promise((resolve, reject) => {
+        if (redirects > 5) {
+            reject(new Error("Redirect API Threads terlalu banyak."));
+            return;
+        }
+
+        const parsed = new URL(url);
+        const client = parsed.protocol === "http:" ? http : https;
+        const req = client.get(parsed, {
+            headers: {
+                accept: "application/json,text/plain;q=0.9,*/*;q=0.8",
+                "accept-language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
+                "user-agent": THREADS_BROWSER_USER_AGENTS[0],
+                ...headers,
+            },
+            timeout: 20000,
+        }, res => {
+            const location = res.headers.location;
+            if ([301, 302, 303, 307, 308].includes(res.statusCode) && location) {
+                res.resume();
+                fetchJson(new URL(location, parsed).toString(), headers, redirects + 1).then(resolve).catch(reject);
+                return;
+            }
+
+            if (res.statusCode >= 400) {
+                res.resume();
+                reject(new Error(`API Threads membalas HTTP ${res.statusCode}.`));
+                return;
+            }
+
+            const chunks = [];
+            let total = 0;
+            res.on("data", chunk => {
+                total += chunk.length;
+                if (total > 12 * 1024 * 1024) {
+                    req.destroy(new Error("Response API Threads terlalu besar."));
+                    return;
+                }
+                chunks.push(chunk);
+            });
+            res.on("end", () => {
+                const body = Buffer.concat(chunks).toString("utf8");
+                try {
+                    resolve(JSON.parse(body));
+                } catch {
+                    reject(new Error("API Threads tidak mengembalikan JSON valid."));
+                }
+            });
+        });
+
+        req.on("timeout", () => req.destroy(new Error("Timeout saat membuka API Threads.")));
         req.on("error", reject);
     });
 }
@@ -277,69 +475,481 @@ function extractMetaValues(html, names) {
 }
 
 function guessMediaTypeFromUrl(url) {
-    const cleanUrl = url.split("?")[0].toLowerCase();
+    const cleanUrl = String(url || "").split("?")[0].toLowerCase();
     if (/\.(mp4|mov|m4v|webm)$/.test(cleanUrl)) return "video";
-    if (/\.(jpg|jpeg|png|webp)$/.test(cleanUrl)) return "image";
+    if (/\.(jpg|jpeg|png|webp|heic|heif)$/.test(cleanUrl)) return "image";
     return null;
+}
+
+function normalizeThreadsMediaUrl(url) {
+    return decodeHtml(String(url || ""))
+        .replace(/\\u0026/gi, "&")
+        .replace(/\\u003d/gi, "=")
+        .replace(/\\u002f/gi, "/")
+        .trim();
 }
 
 function uniqueMedia(media) {
     const seen = new Set();
     return media.filter(item => {
-        const key = item.url.split("?")[0];
+        const url = normalizeThreadsMediaUrl(item?.url);
+        if (!url) return false;
+        const key = `${item.type || "unknown"}:${url}`;
         if (seen.has(key)) return false;
         seen.add(key);
+        item.url = url;
         return true;
     });
 }
 
-function extractThreadsMediaFromHtml(html) {
+function extractThreadsPostCode(url) {
+    try {
+        const segments = new URL(url).pathname.split("/").filter(Boolean);
+        const postIndex = segments.findIndex(segment => segment.toLowerCase() === "post");
+        return postIndex >= 0 && segments[postIndex + 1] ? decodeURIComponent(segments[postIndex + 1]) : null;
+    } catch {
+        const match = String(url || "").match(/\/post\/([^/?#]+)/i);
+        return match ? decodeURIComponent(match[1]) : null;
+    }
+}
+
+function candidateScore(candidate) {
+    const width = Number(candidate?.width || candidate?.original_width || 0);
+    const height = Number(candidate?.height || candidate?.original_height || 0);
+    const bandwidth = Number(candidate?.bandwidth || candidate?.bitrate || 0);
+    return (width * height * 1000) + bandwidth;
+}
+
+function chooseBestThreadsImage(media) {
+    const candidateGroups = [
+        media?.image_versions2?.candidates,
+        media?.image_versions?.candidates,
+        media?.image_versions2,
+    ];
+    const candidates = candidateGroups
+        .flatMap(group => Array.isArray(group) ? group : [])
+        .filter(candidate => candidate && typeof candidate.url === "string")
+        .sort((a, b) => candidateScore(b) - candidateScore(a));
+    if (candidates.length === 0) return null;
+    const best = candidates[0];
+    return {
+        url: normalizeThreadsMediaUrl(best.url),
+        type: "image",
+        width: Number(best.width || media?.original_width || 0) || null,
+        height: Number(best.height || media?.original_height || 0) || null,
+        mediaId: media?.id || media?.pk || null,
+        source: "structured",
+    };
+}
+
+function chooseBestThreadsVideo(media) {
+    const candidateGroups = [
+        media?.video_versions,
+        media?.video_versions2?.candidates,
+        media?.video_candidates,
+    ];
+    const candidates = candidateGroups
+        .flatMap(group => Array.isArray(group) ? group : [])
+        .filter(candidate => candidate && typeof candidate.url === "string")
+        .sort((a, b) => candidateScore(b) - candidateScore(a));
+    if (candidates.length === 0) return null;
+    const best = candidates[0];
+    return {
+        url: normalizeThreadsMediaUrl(best.url),
+        type: "video",
+        width: Number(best.width || media?.original_width || 0) || null,
+        height: Number(best.height || media?.original_height || 0) || null,
+        mediaId: media?.id || media?.pk || null,
+        source: "structured",
+    };
+}
+
+function extractThreadsMediaItem(media) {
+    if (!media || typeof media !== "object") return null;
+    const video = chooseBestThreadsVideo(media);
+    if (video) return video;
+    return chooseBestThreadsImage(media);
+}
+
+function extractThreadsMediaSequence(post) {
+    if (!post || typeof post !== "object") return [];
+    const carousel = Array.isArray(post.carousel_media)
+        ? post.carousel_media
+        : Array.isArray(post.carouselMedia)
+            ? post.carouselMedia
+            : Array.isArray(post?.media?.carousel_media)
+                ? post.media.carousel_media
+                : null;
+
+    if (carousel && carousel.length > 0) {
+        return carousel.map(extractThreadsMediaItem).filter(Boolean);
+    }
+
+    const single = extractThreadsMediaItem(post);
+    return single ? [single] : [];
+}
+
+function threadsUrlMatchesPostCode(value, postCode) {
+    if (typeof value !== "string" || !postCode) return false;
+    try {
+        return extractThreadsPostCode(value) === postCode;
+    } catch {
+        return String(value).includes(`/post/${postCode}`);
+    }
+}
+
+function objectMatchesThreadsPostCode(object, postCode) {
+    if (!object || typeof object !== "object" || !postCode) return false;
+    const directCodes = [object.code, object.shortcode, object.media_code, object.post_code]
+        .filter(value => typeof value === "string");
+    if (directCodes.some(value => value === postCode)) return true;
+
+    // IMPORTANT: share_url and a generic url are NOT identity proof for an original
+    // Threads media record. Threads social/share-card wrappers also point to the same
+    // /post/<code> URL and were the reason a 1200x628 composite card was selected.
+    const strictPermalinks = [object.permalink, object.canonical_url, object.post_url]
+        .filter(value => typeof value === "string");
+    return strictPermalinks.some(value => threadsUrlMatchesPostCode(value, postCode));
+}
+
+function objectReferencesThreadsPostCode(object, postCode) {
+    if (!object || typeof object !== "object" || !postCode) return false;
+    if (objectMatchesThreadsPostCode(object, postCode)) return true;
+    const contextualLinks = [object.share_url, object.url]
+        .filter(value => typeof value === "string");
+    return contextualLinks.some(value => threadsUrlMatchesPostCode(value, postCode));
+}
+
+function hasThreadsMediaPayload(object) {
+    if (!object || typeof object !== "object") return false;
+    if (Array.isArray(object.carousel_media) && object.carousel_media.length > 0) return true;
+    if (Array.isArray(object.carouselMedia) && object.carouselMedia.length > 0) return true;
+    if (Array.isArray(object?.media?.carousel_media) && object.media.carousel_media.length > 0) return true;
+    if (Array.isArray(object?.image_versions2?.candidates) && object.image_versions2.candidates.length > 0) return true;
+    if (Array.isArray(object?.image_versions?.candidates) && object.image_versions.candidates.length > 0) return true;
+    if (Array.isArray(object?.video_versions) && object.video_versions.length > 0) return true;
+    if (Array.isArray(object?.video_versions2?.candidates) && object.video_versions2.candidates.length > 0) return true;
+    return false;
+}
+
+function hasStrongThreadsMediaIdentity(object) {
+    if (!object || typeof object !== "object") return false;
+    return object.media_type != null || object.pk != null || object.media_id != null || object.pk_id != null;
+}
+
+function isClassicThreadsShareCard(media) {
+    if (!Array.isArray(media) || media.length !== 1 || media[0]?.type !== "image") return false;
+    const width = Number(media[0]?.width || 0);
+    const height = Number(media[0]?.height || 0);
+    return width === 1200 && (height === 628 || height === 630);
+}
+
+function isLikelyThreadsShareCardRecord(object, media) {
+    if (!object || typeof object !== "object") return false;
+    const keys = Object.keys(object);
+    const shareishKey = keys.some(key => /(?:^|_)(?:share|social|preview|open_graph|og)(?:_|$)/i.test(key));
+    if (isClassicThreadsShareCard(media) && (shareishKey || !hasStrongThreadsMediaIdentity(object))) return true;
+
+    // A wrapper that merely has share_url/url + image_versions2 but no real Threads
+    // media identity is metadata, not the user's uploaded media.
+    if (shareishKey && !hasStrongThreadsMediaIdentity(object) && !Array.isArray(object.carousel_media)) {
+        return true;
+    }
+    return false;
+}
+
+function parseThreadsScriptPayloads(html) {
+    const payloads = [];
+    const scripts = html.match(/<script\b[^>]*>[\s\S]*?<\/script>/gi) || [];
+
+    for (const script of scripts) {
+        const openEnd = script.indexOf(">");
+        const closeStart = script.toLowerCase().lastIndexOf("</script>");
+        if (openEnd < 0 || closeStart <= openEnd) continue;
+        let body = script.slice(openEnd + 1, closeStart).trim();
+        if (!body || (!body.includes("image_versions2") && !body.includes("video_versions") && !body.includes("carousel_media"))) continue;
+        body = body.replace(/^<!--/, "").replace(/-->$/, "").trim();
+
+        const attempts = [body];
+        const firstObject = body.indexOf("{");
+        const lastObject = body.lastIndexOf("}");
+        if (firstObject >= 0 && lastObject > firstObject) attempts.push(body.slice(firstObject, lastObject + 1));
+        const firstArray = body.indexOf("[");
+        const lastArray = body.lastIndexOf("]");
+        if (firstArray >= 0 && lastArray > firstArray) attempts.push(body.slice(firstArray, lastArray + 1));
+
+        for (const value of attempts) {
+            try {
+                payloads.push(JSON.parse(value));
+                break;
+            } catch {}
+        }
+    }
+
+    return payloads;
+}
+
+const THREADS_SKIP_MEDIA_BRANCH_RE = /^(?:user|owner|profile|avatar|profile_pic|quoted_post|reposted_post|repost|share_card|share_preview|social_preview|link_preview|preview|preview_image|open_graph|og_image|recommended|recommendations|related|suggested)$/i;
+
+function collectThreadsOriginalRecordsInsideContext(root, output, depth = 0) {
+    if (depth > 24 || root == null || typeof root !== "object") return;
+
+    if (hasThreadsMediaPayload(root) && hasStrongThreadsMediaIdentity(root)) {
+        const media = extractThreadsMediaSequence(root);
+        if (media.length > 0 && !isLikelyThreadsShareCardRecord(root, media)) {
+            output.push({ post: root, media, matchStrength: 60 });
+        }
+    }
+
+    if (Array.isArray(root)) {
+        for (const item of root) collectThreadsOriginalRecordsInsideContext(item, output, depth + 1);
+        return;
+    }
+
+    for (const [key, value] of Object.entries(root)) {
+        if (THREADS_SKIP_MEDIA_BRANCH_RE.test(key)) continue;
+        collectThreadsOriginalRecordsInsideContext(value, output, depth + 1);
+    }
+}
+
+function collectThreadsTargetPosts(root, postCode, output, depth = 0) {
+    if (depth > 80 || root == null) return;
+    if (typeof root === "string") {
+        if (root.length > 128 && root.length < 2 * 1024 * 1024 && root.includes(postCode) && /image_versions2|video_versions|carousel_media/.test(root)) {
+            try {
+                collectThreadsTargetPosts(JSON.parse(root), postCode, output, depth + 1);
+            } catch {}
+        }
+        return;
+    }
+    if (typeof root !== "object") return;
+
+    if (objectMatchesThreadsPostCode(root, postCode) && hasThreadsMediaPayload(root)) {
+        const media = extractThreadsMediaSequence(root);
+        if (media.length > 0 && !isLikelyThreadsShareCardRecord(root, media)) {
+            output.push({ post: root, media, matchStrength: 100 });
+        }
+    } else if (objectReferencesThreadsPostCode(root, postCode)) {
+        // share_url/url may identify a TARGET CONTEXT, but never its own image_versions2.
+        // Search below that wrapper only for records carrying real Threads media identity.
+        collectThreadsOriginalRecordsInsideContext(root, output);
+    }
+
+    if (Array.isArray(root)) {
+        for (const item of root) collectThreadsTargetPosts(item, postCode, output, depth + 1);
+        return;
+    }
+
+    for (const [key, value] of Object.entries(root)) {
+        if (THREADS_SKIP_MEDIA_BRANCH_RE.test(key)) continue;
+        collectThreadsTargetPosts(value, postCode, output, depth + 1);
+    }
+}
+
+function extractThreadsStructuredMediaFromHtml(html, postCode) {
+    if (!postCode) return [];
+    const matches = [];
+    for (const payload of parseThreadsScriptPayloads(html)) {
+        collectThreadsTargetPosts(payload, postCode, matches);
+    }
+    if (matches.length === 0) return [];
+
+    matches.sort((a, b) => {
+        if ((b.matchStrength || 0) !== (a.matchStrength || 0)) {
+            return (b.matchStrength || 0) - (a.matchStrength || 0);
+        }
+        return b.media.length - a.media.length;
+    });
+    return uniqueMedia(matches[0].media);
+}
+
+function extractThreadsVerifiedVideoFallback(html) {
     const videos = extractMetaValues(html, [
         "og:video",
         "og:video:url",
         "og:video:secure_url",
         "twitter:player:stream",
-    ]).map(url => ({ url, type: "video" }));
-
-    const images = extractMetaValues(html, [
-        "og:image",
-        "og:image:url",
-        "og:image:secure_url",
-        "twitter:image",
     ])
-        .filter(url => !/static\.cdninstagram\.com\/rsrc\.php/i.test(url))
-        .map(url => ({ url, type: "image" }));
-
-    const directMatches = html.match(/https?:\\?\/\\?\/[^"'<>\s]+?\.(?:mp4|jpg|jpeg|png|webp)(?:\?[^"'<>\s]*)?/gi) || [];
-    const directMedia = directMatches
-        .map(url => decodeHtml(url))
-        .map(url => ({ url, type: guessMediaTypeFromUrl(url) }))
-        .filter(item => item.type === "video" && !/static\.cdninstagram\.com\/rsrc\.php/i.test(item.url));
-
-    return uniqueMedia([...videos, ...images, ...directMedia]);
+        .map(normalizeThreadsMediaUrl)
+        .filter(url => /^https?:\/\//i.test(url))
+        .map(url => ({ url, type: "video", source: "meta-video-fallback" }));
+    return uniqueMedia(videos);
 }
 
-async function extractThreadsMedia(url) {
-    const attempts = THREADS_CRAWLER_USER_AGENTS.map(userAgent => ({
-        url,
-        headers: {
-            "user-agent": userAgent,
-            referer: "https://www.threads.com/",
-        },
-    }));
+function extractThreadsMediaFromHtml(html, postCode) {
+    const structured = extractThreadsStructuredMediaFromHtml(html, postCode);
+    if (structured.length > 0) return structured;
 
-    let lastError = null;
-    for (const attempt of attempts) {
-        try {
-            const html = await fetchText(attempt.url, attempt.headers);
-            const media = extractThreadsMediaFromHtml(html);
-            if (media.length > 0) return media;
-        } catch (error) {
-            lastError = error;
+    // Image OG/Twitter cards are intentionally NOT used: Threads frequently renders
+    // a composite white share-card there. If structured original media is unavailable,
+    // failing is safer than returning the wrong image. Video metadata is retained only
+    // when it points directly at an actual video file.
+    return extractThreadsVerifiedVideoFallback(html);
+}
+
+function buildThreadsVredenUrl(url) {
+    const endpoint = new URL(THREADS_VREDEN_ENDPOINT);
+    endpoint.searchParams.set("url", url);
+    return endpoint.toString();
+}
+
+function collectThreadsApiUrlEntries(value, pathParts = [], output = [], depth = 0) {
+    if (depth > 40 || value == null) return output;
+
+    if (typeof value === "string") {
+        const normalized = normalizeThreadsMediaUrl(value);
+        if (/^https?:\/\//i.test(normalized)) {
+            output.push({ url: normalized, path: pathParts.join(".").toLowerCase() });
+        }
+        return output;
+    }
+
+    if (Array.isArray(value)) {
+        value.forEach((item, index) => collectThreadsApiUrlEntries(item, [...pathParts, String(index)], output, depth + 1));
+        return output;
+    }
+
+    if (typeof value === "object") {
+        for (const [key, item] of Object.entries(value)) {
+            collectThreadsApiUrlEntries(item, [...pathParts, key], output, depth + 1);
         }
     }
 
-    throw new Error(lastError?.message || "Media publik Threads tidak ditemukan di metadata halaman.");
+    return output;
+}
+
+function isProbablyThreadsPageUrl(url) {
+    const clean = String(url || "").toLowerCase();
+    if (/\.(?:mp4|mov|m4v|webm|jpg|jpeg|png|webp|heic|heif)(?:[/?#.]|$)/i.test(clean)) return false;
+    try {
+        const parsed = new URL(url);
+        return /(^|\.)threads\.(?:net|com)$/i.test(parsed.hostname);
+    } catch {
+        return false;
+    }
+}
+
+function isThreadsApiAssetUrl(url, mediaType) {
+    const clean = normalizeThreadsMediaUrl(url);
+    if (!/^https?:\/\//i.test(clean)) return false;
+    if (/static\.cdninstagram\.com\/rsrc\.php/i.test(clean)) return false;
+    if (/(?:profile_pic|avatar|t51\.2885-19)/i.test(clean)) return false;
+
+    const guessed = guessMediaTypeFromUrl(clean);
+    if (mediaType && guessed && guessed !== mediaType) return false;
+    if (guessed) return true;
+
+    try {
+        const host = new URL(clean).hostname.toLowerCase();
+        return /(?:cdninstagram\.com|fbcdn\.net)$/.test(host) || host.includes("cdninstagram.com") || host.includes("fbcdn.net");
+    } catch {
+        return false;
+    }
+}
+
+function threadsApiAssetKey(url) {
+    try {
+        const parsed = new URL(normalizeThreadsMediaUrl(url));
+        return `${parsed.hostname.toLowerCase()}${parsed.pathname}`;
+    } catch {
+        return normalizeThreadsMediaUrl(url).split("?")[0];
+    }
+}
+
+function extractThreadsMediaFromApiPayload(payload) {
+    const entries = collectThreadsApiUrlEntries(payload);
+    const output = [];
+    const seen = new Set();
+    const rejectedPathRe = /(?:^|\.)(?:avatar|profile|profile_pic|thumbnail|thumb|cover|logo|link_preview|preview_image|share_card|share_preview|social_preview|open_graph|og_image)(?:\.|$)/i;
+
+    for (const entry of entries) {
+        const url = normalizeThreadsMediaUrl(entry.url);
+        const entryPath = String(entry.path || "").toLowerCase();
+        if (!url || isProbablyThreadsPageUrl(url) || rejectedPathRe.test(entryPath)) continue;
+
+        let mediaType = guessMediaTypeFromUrl(url);
+        if (!mediaType) {
+            if (/(?:^|\.)(?:video|video_versions|play_url|video_url|download_url)(?:\.|$)/i.test(entryPath)) mediaType = "video";
+            else if (/(?:^|\.)(?:image|image_versions2|image_versions|photo|picture|media_url|carousel_media)(?:\.|$)/i.test(entryPath)) mediaType = "image";
+        }
+        if (!mediaType || !isThreadsApiAssetUrl(url, mediaType)) continue;
+
+        const key = `${mediaType}:${threadsApiAssetKey(url)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        output.push({
+            url,
+            type: mediaType,
+            width: null,
+            height: null,
+            mediaId: null,
+            source: "threads-vreden-api",
+        });
+    }
+
+    return output.slice(0, CONFIG.maxFiles);
+}
+
+async function extractThreadsMediaFromApi(url, options = {}) {
+    const requestJson = options.requestJson || fetchJson;
+    const apiUrl = buildThreadsVredenUrl(url);
+    const payload = await requestJson(apiUrl, {
+        referer: "https://api.vreden.my.id/",
+    });
+    const media = extractThreadsMediaFromApiPayload(payload);
+    if (media.length === 0) throw new Error("Vreden tidak mengembalikan media original Threads.");
+    console.log("[THREADS DL] original media source=Vreden", { count: media.length });
+    return media;
+}
+
+async function extractThreadsMedia(url, options = {}) {
+    const normalizedUrl = normalizeDownloadUrl(url, "threads");
+    const errors = [];
+
+    // Sama seperti downloader Telegram project ini: Vreden lebih dulu karena
+    // endpoint Threads mengembalikan structured post-media dan menangani /share/ URL.
+    // Direct HTML tetap fallback agar downloader tidak bergantung pada satu provider.
+    try {
+        return await extractThreadsMediaFromApi(normalizedUrl, options);
+    } catch (error) {
+        errors.push(`api: ${error.message}`);
+        console.log("[THREADS DL] Vreden fallback", { error: error.message });
+    }
+
+    const fetchPage = options.fetchPage || fetchThreadsPage;
+    const initialPostCode = extractThreadsPostCode(normalizedUrl);
+    for (const userAgent of THREADS_PAGE_USER_AGENTS) {
+        try {
+            const page = await fetchPage(normalizedUrl, {
+                "user-agent": userAgent,
+                referer: "https://www.threads.com/",
+            });
+            const html = typeof page === "string" ? page : page?.html;
+            const finalUrl = typeof page === "string" ? normalizedUrl : (page?.finalUrl || normalizedUrl);
+            const effectivePostCode = extractThreadsPostCode(finalUrl) || initialPostCode;
+            if (!effectivePostCode) {
+                errors.push(`html/${userAgent.slice(0, 18)}: redirect tidak menghasilkan URL /post/`);
+                continue;
+            }
+
+            const media = extractThreadsMediaFromHtml(html || "", effectivePostCode);
+            if (media.length > 0) {
+                console.log("[THREADS DL] original media source=direct-html", {
+                    count: media.length,
+                    postCode: effectivePostCode,
+                });
+                return media.slice(0, CONFIG.maxFiles);
+            }
+            errors.push(`html/${userAgent.slice(0, 18)}: media original tidak ditemukan`);
+        } catch (error) {
+            errors.push(`html/${userAgent.slice(0, 18)}: ${error.message}`);
+        }
+    }
+
+    throw new Error(
+        "Original media Threads tidak ditemukan. Social/share preview card sengaja tidak digunakan. " +
+        errors.slice(-5).join(" | ")
+    );
 }
 
 function guessExtFromContentType(contentType, fallbackType) {
@@ -352,6 +962,8 @@ function guessExtFromContentType(contentType, fallbackType) {
     if (type.includes("image/png")) return "png";
     if (type.includes("image/webp")) return "webp";
     if (type.includes("image/jpeg") || type.includes("image/jpg")) return "jpg";
+    if (type.includes("image/heic")) return "heic";
+    if (type.includes("image/heif")) return "heif";
     if (fallbackType === "video") return "mp4";
     if (fallbackType === "audio") return "mp3";
     return "jpg";
@@ -417,7 +1029,9 @@ function downloadRemoteFile(url, type, index, redirects = 0) {
                 return;
             }
 
-            const ext = path.extname(parsed.pathname).replace(".", "").toLowerCase() || guessExtFromContentType(res.headers["content-type"], type);
+            const urlExt = path.extname(parsed.pathname).replace(".", "").toLowerCase();
+            const contentExt = guessExtFromContentType(res.headers["content-type"], type);
+            const ext = ["heic", "heif"].includes(contentExt) ? contentExt : (urlExt || contentExt);
             const filePath = path.join(CONFIG.tempDir, `threads_${Date.now()}_${index}.${ext}`);
             const stream = fs.createWriteStream(filePath);
             let total = 0;
@@ -500,7 +1114,6 @@ function runFfmpegToMp3(filePath) {
 async function downloadThreads(url, mode) {
     const media = await extractThreadsMedia(url);
     const videoMedia = media.filter(item => item.type === "video");
-    const imageMedia = media.filter(item => item.type === "image");
     const downloaded = [];
     const audioFiles = [];
 
@@ -508,12 +1121,15 @@ async function downloadThreads(url, mode) {
         throw new Error("Postingan Threads ini terdeteksi sebagai gambar, jadi tidak ada audio untuk diambil.");
     }
 
-    const selected = (mode === "audio" ? videoMedia : (videoMedia.length > 0 ? videoMedia : imageMedia)).slice(0, CONFIG.maxFiles);
+    const selected = (mode === "audio" ? videoMedia : media).slice(0, CONFIG.maxFiles);
     if (selected.length === 0) throw new Error("Media publik Threads tidak ditemukan.");
 
     try {
         for (let index = 0; index < selected.length; index++) {
-            downloaded.push(await downloadRemoteFile(selected[index].url, selected[index].type, index + 1));
+            const file = await downloadRemoteFile(selected[index].url, selected[index].type, index + 1);
+            file.sourceUrl = selected[index].url;
+            file.mediaIndex = index;
+            downloaded.push(file);
         }
 
         if (mode !== "audio") return downloaded;
@@ -750,6 +1366,14 @@ async function downloadTikTokViaApi(url, mode) {
 }
 
 async function downloadTikTok(url, mode) {
+    url = unwrapTikTokRedirectUrl(url);
+    const unsupportedPage = getUnsupportedTikTokPageKind(url);
+    if (unsupportedPage) {
+        throw new Error(unsupportedPage === "minis"
+            ? "Link ini membuka TikTok Minis, bukan postingan video/foto TikTok."
+            : "Link ini membuka halaman login TikTok, bukan postingan video/foto TikTok.");
+    }
+
     let ytFiles = [];
     let ytError = null;
     let apiData = null;
@@ -847,14 +1471,227 @@ async function react(sock, jid, key, emoji) {
     }
 }
 
+function mimeTypeForFile(filePath) {
+    const ext = path.extname(filePath).replace(".", "").toLowerCase();
+    if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
+    if (ext === "png") return "image/png";
+    if (ext === "webp") return "image/webp";
+    if (ext === "heic") return "image/heic";
+    if (ext === "heif") return "image/heif";
+    if (ext === "mp4" || ext === "m4v" || ext === "mov") return "video/mp4";
+    if (ext === "webm") return "video/webm";
+    return "application/octet-stream";
+}
+
+function runFfmpegImageToJpeg(inputPath, outputPath) {
+    return new Promise((resolve, reject) => {
+        const child = spawn("ffmpeg", [
+            "-y",
+            "-i", inputPath,
+            "-frames:v", "1",
+            "-q:v", "2",
+            outputPath,
+        ], {
+            windowsHide: true,
+            stdio: ["ignore", "ignore", "pipe"],
+        });
+        let stderr = "";
+        child.stderr.on("data", chunk => { stderr += chunk.toString(); });
+        child.on("error", reject);
+        child.on("close", code => {
+            if (code !== 0 || !fs.existsSync(outputPath)) {
+                reject(new Error((stderr || `ffmpeg keluar dengan kode ${code}`).trim()));
+                return;
+            }
+            resolve(outputPath);
+        });
+    });
+}
+
+async function convertThreadsHeicToJpeg(inputPath, outputPath) {
+    try {
+        const sharp = require("sharp");
+        await sharp(inputPath)
+            .rotate()
+            .jpeg({ quality: 95, chromaSubsampling: "4:4:4" })
+            .toFile(outputPath);
+        return outputPath;
+    } catch (sharpError) {
+        try {
+            return await runFfmpegImageToJpeg(inputPath, outputPath);
+        } catch (ffmpegError) {
+            throw new Error(`HEIC preview gagal dikonversi (sharp: ${sharpError.message}; ffmpeg: ${ffmpegError.message})`);
+        }
+    }
+}
+
+async function prepareThreadsImagePreview(file, index, options = {}) {
+    const ext = path.extname(file.filePath).replace(".", "").toLowerCase();
+    if (WHATSAPP_VIEWABLE_IMAGE_EXTENSIONS.has(ext)) {
+        return { filePath: file.filePath, temporary: false };
+    }
+    if (!new Set(["heic", "heif"]).has(ext)) {
+        return { filePath: file.filePath, temporary: false };
+    }
+
+    const outputPath = path.join(CONFIG.tempDir, `threads_preview_${Date.now()}_${index + 1}.jpg`);
+    const converter = options.convertHeicToJpeg || convertThreadsHeicToJpeg;
+    await converter(file.filePath, outputPath);
+    return { filePath: outputPath, temporary: true };
+}
+
+function buildThreadsSummary(files) {
+    const imageCount = files.filter(file => file.type === "image").length;
+    const videoCount = files.filter(file => file.type === "video").length;
+    const parts = ["✅ Threads berhasil didownload"];
+    if (imageCount > 0 && videoCount > 0) parts.push(`🖼️ ${imageCount} gambar • 🎬 ${videoCount} video`);
+    else if (imageCount > 0) parts.push(`🖼️ ${imageCount} media`);
+    else if (videoCount > 0) parts.push(`🎬 ${videoCount} video`);
+    if (imageCount > 0) parts.push("📦 Original files disertakan");
+    return parts.join("\n");
+}
+
+async function sendThreadsDownloadedFiles(sock, jid, files, mode, options = {}) {
+    if (mode === "audio") {
+        await sendDownloadedFiles(sock, jid, files, "Threads", mode);
+        return;
+    }
+
+    const previewTemps = [];
+    const imageOriginals = files.filter(file => file.type === "image");
+    const summary = buildThreadsSummary(files);
+    let summarySent = false;
+    let previewFailures = 0;
+
+    try {
+        const imageOnly = files.length > 1 && files.every(file => file.type === "image");
+
+        // Threads image carousel: prepare every viewable preview first, then use the
+        // project's existing Baileys album sender so WhatsApp groups them as one album.
+        if (imageOnly) {
+            const previews = [];
+            for (let index = 0; index < files.length; index++) {
+                try {
+                    const preview = await prepareThreadsImagePreview(files[index], index, options);
+                    if (preview.temporary) previewTemps.push({ filePath: preview.filePath });
+                    previews.push({ file: files[index], preview, index });
+                } catch (error) {
+                    previewFailures += 1;
+                    console.log("[THREADS-DL] Preview image gagal; original document tetap akan dikirim.", {
+                        index: index + 1,
+                        error: error.message,
+                    });
+                }
+            }
+
+            const summaryWithWarning = previewFailures > 0
+                ? `${summary}\n⚠️ ${previewFailures} preview gagal dibuat; original tetap disertakan.`
+                : summary;
+
+            if (previews.length >= 2) {
+                await sendImageAlbum(
+                    sock,
+                    jid,
+                    previews.map(item => ({ url: item.preview.filePath })),
+                    { caption: summaryWithWarning }
+                );
+                summarySent = true;
+            } else if (previews.length === 1) {
+                await sock.sendMessage(jid, {
+                    image: { url: previews[0].preview.filePath },
+                    caption: summaryWithWarning,
+                });
+                summarySent = true;
+            }
+        } else {
+            // Mixed carousel cannot use the image-only album envelope without changing
+            // item ordering, so preserve the exact image/video sequence from Threads.
+            for (let index = 0; index < files.length; index++) {
+                const file = files[index];
+                const caption = summarySent ? undefined : summary;
+
+                if (file.type === "image") {
+                    try {
+                        const preview = await prepareThreadsImagePreview(file, index, options);
+                        if (preview.temporary) previewTemps.push({ filePath: preview.filePath });
+                        await sock.sendMessage(jid, {
+                            image: { url: preview.filePath },
+                            ...(caption ? { caption } : {}),
+                        });
+                        summarySent = true;
+                    } catch (error) {
+                        previewFailures += 1;
+                        console.log("[THREADS-DL] Preview image gagal; original document tetap akan dikirim.", {
+                            index: index + 1,
+                            error: error.message,
+                        });
+                    }
+                } else if (file.type === "video") {
+                    await sock.sendMessage(jid, {
+                        video: { url: file.filePath },
+                        mimetype: mimeTypeForFile(file.filePath),
+                        ...(caption ? { caption } : {}),
+                    });
+                    summarySent = true;
+                } else {
+                    await sock.sendMessage(jid, {
+                        document: { url: file.filePath },
+                        mimetype: mimeTypeForFile(file.filePath),
+                        fileName: path.basename(file.filePath),
+                        ...(caption ? { caption } : {}),
+                    });
+                    summarySent = true;
+                }
+
+                if (files.length > 1) await delay(700);
+            }
+        }
+
+        for (let index = 0; index < imageOriginals.length; index++) {
+            const file = imageOriginals[index];
+            let caption;
+            if (index === 0) {
+                caption = summarySent
+                    ? `📦 Original files Threads • ${imageOriginals.length} file`
+                    : summary;
+                if (previewFailures > 0 && !caption.includes("preview gagal")) {
+                    caption += `\n⚠️ ${previewFailures} preview gagal dibuat; original tetap disertakan.`;
+                }
+            }
+            await sock.sendMessage(jid, {
+                document: { url: file.filePath },
+                mimetype: mimeTypeForFile(file.filePath),
+                fileName: path.basename(file.filePath),
+                ...(caption ? { caption } : {}),
+            });
+            if (imageOriginals.length > 1) await delay(500);
+        }
+    } finally {
+        cleanupFiles(previewTemps);
+    }
+}
+
 async function sendDownloadedFiles(sock, jid, files, label, mode) {
+    const imageFiles = files.filter(file => file.type === "image");
+    if (mode !== "audio" && imageFiles.length === files.length && imageFiles.length > 1) {
+        await sendImageAlbum(
+            sock,
+            jid,
+            imageFiles.map(file => ({ url: file.filePath })),
+            {
+                caption: `✅ ${label} berhasil didownload (${imageFiles.length} gambar)\n\n_Watermark: USERBOT_`,
+            }
+        );
+        return;
+    }
+
     for (let index = 0; index < files.length; index++) {
         const file = files[index];
         const fileName = path.basename(file.filePath);
         const counter = files.length > 1 ? ` (${index + 1}/${files.length})` : "";
         const caption = file.type === "image" && files.length > 1 && index > 0
             ? `✅ ${label} berhasil didownload${counter}`
-            : `✅ ${label} berhasil didownload${counter}\n\n_Watermark: USERBOT FAHRI_`;
+            : `✅ ${label} berhasil didownload${counter}\n\n_Watermark: USERBOT_`;
 
         if (mode === "audio" || file.type === "audio") {
             await sock.sendMessage(jid, {
@@ -886,7 +1723,7 @@ async function sendDownloadedFiles(sock, jid, files, label, mode) {
     }
 }
 
-async function handleLocalDownload(sock, from, text, pushName, inputMessageKey) {
+async function handleLocalDownload(sock, from, text, pushName, inputMessageKey, inputMessage) {
     if (String(from || "").toLowerCase().endsWith("@g.us")) return false;
 
     const sessionKey = makeSessionKey(from);
@@ -920,7 +1757,11 @@ async function handleLocalDownload(sock, from, text, pushName, inputMessageKey) 
         try {
             await react(sock, from, reactionKey, "⏳");
             files = await downloadByPlatform(session.url, mode, session.platform);
-            await sendDownloadedFiles(sock, from, files, label, mode);
+            if (session.platform === "threads") {
+                await sendThreadsDownloadedFiles(sock, from, files, mode);
+            } else {
+                await sendDownloadedFiles(sock, from, files, label, mode);
+            }
             await react(sock, from, reactionKey, "✅");
             await delay(700);
             await messageCleaner.deleteMany(sock, from, temporaryKeys, "pesan downloader");
@@ -928,16 +1769,14 @@ async function handleLocalDownload(sock, from, text, pushName, inputMessageKey) 
         } catch (error) {
             await react(sock, from, reactionKey, "❌");
             await messageCleaner.deleteMany(sock, from, temporaryKeys, "pesan downloader");
-            const hint = session.platform === "threads"
-                ? "Pastikan link Threads publik. Kalau hanya preview yang tersedia, bot akan ambil media dari metadata publik Threads."
-                : session.platform === "tiktok"
-                    ? "Video TikTok diproses dengan yt-dlp lama. Untuk foto/slideshow, bot memakai fallback TikTok API. Pastikan link publik dan yt-dlp terbaru."
-                    : `Pastikan link publik, yt-dlp terbaru, dan untuk Instagram private gunakan file cookies di:\n${CONFIG.cookiesPath}`;
+            console.log("[LOCAL-DL] Detail kegagalan disembunyikan dari pengguna:", {
+                platform: session.platform,
+                error: error.message,
+            });
             await sock.sendMessage(from, {
                 text:
                     `❌ Gagal download ${label}.\n\n` +
-                    `${error.message}\n\n` +
-                    hint,
+                    `Media tidak dapat diambil. Pastikan link postingan bersifat publik dan coba kembali beberapa saat lagi.`,
             });
             await delay(700);
             await messageCleaner.safeDelete(sock, from, inputMessageKey, "pesan pilihan download");
@@ -948,19 +1787,40 @@ async function handleLocalDownload(sock, from, text, pushName, inputMessageKey) 
         return true;
     }
 
-    const platform = detectPlatform(text);
-    const url = extractUrl(text);
+    if (!/^\.dl(?:\s|$)/i.test(String(text || "").trim())) return false;
+
+    const commandArgument = String(text || "").replace(/^\.dl\b/i, "").trim();
+    const quotedText = extractQuotedText(inputMessage?.message?.extendedTextMessage?.contextInfo?.quotedMessage);
+    const downloadText = commandArgument || quotedText;
+    const platform = detectPlatform(downloadText);
+    const url = extractUrl(downloadText);
     if (!platform || !url) return false;
 
     const label = platformLabel(platform);
     const normalizedUrl = normalizeDownloadUrl(url, platform);
+    const unsupportedTikTokPage = platform === "tiktok"
+        ? getUnsupportedTikTokPageKind(normalizedUrl)
+        : null;
+
+    if (unsupportedTikTokPage) {
+        await sock.sendMessage(from, {
+            text:
+                `❌ *Itu bukan link video TikTok.*\n\n` +
+                `Link yang masuk adalah halaman ${unsupportedTikTokPage === "minis" ? "TikTok Minis" : "login TikTok"}, ` +
+                `jadi tidak berisi video/foto publik yang bisa diunduh.\n\n` +
+                `Buka postingan videonya → tekan *Bagikan* → *Salin tautan*, lalu kirim link tersebut ke bot. ` +
+                `Biasanya link yang benar berbentuk *vt.tiktok.com/...* atau *tiktok.com/@nama/video/...*.`
+        });
+        return true;
+    }
+
     const menuText =
         `🌐 *Link ${label} terdeteksi!*\n\n` +
         `Pilih format download:\n\n` +
         `*1* — Media utama\n` +
         `*2* — Audio MP3${platform === "threads" ? " (jika video)" : ""}\n` +
-        `*3* — Batal\n\n` +
-        `_${platform === "threads" ? "Diproses dari metadata publik Threads" : "Diproses lokal dengan yt-dlp"}. Watermark: USERBOT FAHRI_`;
+        `*3* — Batal` +
+        (platform === "threads" ? "" : `\n\n_Watermark: USERBOT_`);
 
     const menuMsg = await sock.sendMessage(from, { text: menuText });
     if (!menuMsg?.key?.id) {
@@ -979,8 +1839,22 @@ module.exports = {
     handleLocalDownload,
     detectPlatform,
     extractUrl,
+    extractUrls,
     normalizeDownloadUrl,
+    unwrapTikTokRedirectUrl,
+    getUnsupportedTikTokPageKind,
+    isLikelyTikTokMediaUrl,
+    sendDownloadedFiles,
     extractThreadsMedia,
+    extractThreadsMediaFromApi,
+    extractThreadsMediaFromApiPayload,
+    buildThreadsVredenUrl,
+    extractThreadsMediaFromHtml,
+    extractThreadsStructuredMediaFromHtml,
+    extractThreadsPostCode,
+    prepareThreadsImagePreview,
+    sendThreadsDownloadedFiles,
+    sendDownloadedFiles,
     downloadThreads,
     MEDIA_DIR: CONFIG.tempDir,
     getMediaDirs: () => [CONFIG.tempDir],

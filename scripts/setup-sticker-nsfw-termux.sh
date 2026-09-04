@@ -1,7 +1,8 @@
 #!/data/data/com.termux/files/usr/bin/bash
 set -euo pipefail
 
-cd "${HOME}/fahriwhatsapp-main"
+PROJECT_DIR="${USERBOT_PROJECT_DIR:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}"
+cd "${PROJECT_DIR}"
 
 echo "== Memasang ImageMagick =="
 pkg install -y imagemagick

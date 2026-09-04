@@ -22,10 +22,40 @@ function makeScopeMessage(remoteJid) {
     return { key: { remoteJid, fromMe: false }, message: { conversation: "internal-auto-reply" } }
 }
 
-function getFirstName(msg) {
-    const pushName = String(msg?.pushName || "").normalize("NFKC").replace(/\s+/g, " ").trim()
-    if (!pushName) return "kamu"
-    const first = pushName.split(" ")[0].replace(/[^\p{L}\p{N}._'-]/gu, "").slice(0, 30)
+function getContactJidCandidates(msg, options = {}) {
+    const provided = Array.isArray(options.contactJids) ? options.contactJids : [options.contactJids]
+    return [...new Set([
+        ...provided,
+        options.senderJid,
+        msg?.key?.participantAlt,
+        msg?.key?.participant,
+        msg?.participantAlt,
+        msg?.participant,
+        msg?.key?.remoteJidAlt,
+        msg?.key?.remoteJid,
+    ].map(normalizeJid).filter(Boolean))]
+}
+
+function resolvePersonalName(msg, options = {}) {
+    const contactStore = options.contactNameStore
+    if (contactStore && typeof contactStore.resolveContactName === "function") {
+        for (const jid of getContactJidCandidates(msg, options)) {
+            try {
+                const savedName = String(contactStore.resolveContactName(jid, []) || "").trim()
+                if (savedName) return savedName
+            } catch {}
+        }
+    }
+    return String(msg?.pushName || "").trim()
+}
+
+function getFirstName(msg, options = {}) {
+    const personalName = resolvePersonalName(msg, options)
+        .normalize("NFKC")
+        .replace(/\s+/g, " ")
+        .trim()
+    if (!personalName) return "kamu"
+    const first = personalName.split(" ")[0].replace(/[^\p{L}\p{N}._'-]/gu, "").slice(0, 30)
     return first || "kamu"
 }
 
@@ -51,7 +81,7 @@ function renderPersonalText(value, msg, options = {}) {
     const original = String(value || "")
     if (!original) return original
 
-    const name = getFirstName(msg)
+    const name = getFirstName(msg, options)
     const greeting = getTimeGreeting()
     let text = original
         .replace(/\{\{?\s*(?:name|firstName)\s*\}?\}/gi, name)
@@ -91,6 +121,7 @@ function getAutoReplyPresentationHealth() {
     return {
         quotedBubble: envEnabled(process.env.AUTO_REPLY_QUOTED_BUBBLE, true),
         personalName: envEnabled(process.env.AUTO_REPLY_PERSONAL_NAME, true),
+        savedContactNamePriority: true,
         placeholderSupport: true,
     }
 }
@@ -149,9 +180,11 @@ async function sendAutoReply(sock, remoteJid, replyMessage, options = {}) {
 
 module.exports = {
     getAutoReplyPresentationHealth,
+    getContactJidCandidates,
     getFirstName,
     getTimeGreeting,
     personalizeContent,
+    resolvePersonalName,
     renderPersonalText,
     sendAutoReply,
     sendOwnerNotification,

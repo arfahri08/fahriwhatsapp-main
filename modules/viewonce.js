@@ -114,6 +114,11 @@ function findViewOnceMediaDeep(value, path = [], inViewOnceWrapper = false, dept
 
     for (const [key, child] of Object.entries(value)) {
         if (!child || typeof child !== "object") continue;
+        // quotedMessage hanyalah referensi ke pesan asli. Jangan menganggap media
+        // view-once di dalam reply sebagai view-once baru milik pengirim reply.
+        // Saat owner membuka reply, resolveReplyTarget tetap mengambil pesan asli
+        // dari brankas dan memprosesnya sebagai root message terpisah.
+        if (/^(?:contextInfo|quotedMessage)$/i.test(key)) continue;
         const childInViewOnce = currentIsViewOnce || /viewonce/i.test(key);
 
         if (Array.isArray(child)) {
@@ -732,6 +737,7 @@ async function handleAntiViewOnce(sock, msg, options = {}) {
         await securityMediaLog.sendViewOnceLog(sock, {
             sourceJid: targetRemoteJid,
             senderJid: senderInfo.mentionJid || senderInfo.rawJid,
+            senderName: resolved.targetPushName,
             messageId: resolved.targetKey?.id,
             mediaType: mediaInfo.type,
             messageTimestamp: msg.messageTimestamp,

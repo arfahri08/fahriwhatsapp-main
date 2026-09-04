@@ -2,8 +2,11 @@
 
 const fs = require("fs")
 const path = require("path")
+const groupRuntimePolicy = require("./groupRuntimePolicy")
 
-const DATA_FILE = path.join(__dirname, "..", "data", "groupRemoteControl.json")
+const DATA_FILE = process.env.GROUP_REMOTE_CONTROL_DATA_FILE
+    ? path.resolve(process.env.GROUP_REMOTE_CONTROL_DATA_FILE)
+    : path.join(__dirname, "..", "data", "groupRemoteControl.json")
 const PRIVATE_ONLY_FEATURES = new Set([
     "antilink",
     "antiLink",
@@ -37,6 +40,22 @@ const FEATURE_ALIASES = {
     groupgoodbye: "goodbye",
     kicksticker: "kickSticker",
     stickerkick: "kickSticker",
+    grouputilities: "groupUtilities",
+    grouputility: "groupUtilities",
+    utilitygroup: "groupUtilities",
+    groupschedule: "groupSchedule",
+    jadwalgroup: "groupSchedule",
+    groupmoderation: "groupModeration",
+    moderation: "groupModeration",
+    groupattendance: "groupAttendance",
+    absensi: "groupAttendance",
+    slowmode: "slowmode",
+    antispam: "antiSpam",
+    flood: "antiSpam",
+    store: "store",
+    shop: "store",
+    nsfw: "nsfwModeration",
+    nsfwmoderation: "nsfwModeration",
 }
 const DEFAULT_FEATURES = Object.freeze({
     antiToxic: true,
@@ -54,6 +73,14 @@ const DEFAULT_FEATURES = Object.freeze({
     groupMenu: true,
     kickSticker: true,
     warning: true,
+    groupUtilities: true,
+    groupSchedule: true,
+    groupModeration: true,
+    groupAttendance: true,
+    slowmode: true,
+    antiSpam: true,
+    store: true,
+    nsfwModeration: true,
 })
 
 let stateCache = null
@@ -119,10 +146,13 @@ function getRawGroupConfig(groupJid) {
     return loadState().groups[jid] || null
 }
 
-function getEffectiveGroupConfig(groupJid) {
+function getEffectiveGroupConfig(groupJid, runtime = {}) {
     const jid = normalizeJid(groupJid)
-    const raw = getRawGroupConfig(jid) || {}
-    const botEnabled = readBoolean(raw.botEnabled, readBoolean(raw.enabled, readBoolean(raw.bot, true)))
+    const stored = getRawGroupConfig(jid)
+    const raw = stored || {}
+    const explicitBotEnabled = readBoolean(raw.botEnabled, readBoolean(raw.enabled, readBoolean(raw.bot, null)))
+    // Fail closed: grup yang belum pernah diaktifkan owner selalu OFF.
+    const configuredBotEnabled = explicitBotEnabled === true
     const rawFeatures = raw.features && typeof raw.features === "object" ? raw.features : {}
     const features = { ...DEFAULT_FEATURES, ...rawFeatures }
 
@@ -130,12 +160,38 @@ function getEffectiveGroupConfig(groupJid) {
         if (raw[key] === true || raw[key] === false) features[key] = raw[key]
     }
 
+    const botAdmin = typeof runtime.botAdmin === "boolean" ? runtime.botAdmin : null
+    const metadataAvailable = typeof runtime.metadataAvailable === "boolean"
+        ? runtime.metadataAvailable
+        : botAdmin !== null
+    const effectiveBotEnabled = configuredBotEnabled
+    const effectiveManagementEnabled = Boolean(configuredBotEnabled && metadataAvailable && botAdmin)
+    const effectiveFeatures = Object.fromEntries(Object.keys(DEFAULT_FEATURES).map(feature => [
+        feature,
+        Boolean(
+            effectiveBotEnabled
+            && features[feature] !== false
+            && (
+                !groupRuntimePolicy.isAdminRequiredFeature(feature)
+                || effectiveManagementEnabled
+            )
+        ),
+    ]))
+
     return {
         jid,
-        exists: Boolean(getRawGroupConfig(jid)),
-        botEnabled,
-        enabled: botEnabled,
-        bot: botEnabled,
+        exists: Boolean(stored),
+        botConfig: explicitBotEnabled === null ? "DEFAULT" : (explicitBotEnabled ? "ON" : "OFF"),
+        explicitBotEnabled,
+        configuredBotEnabled,
+        botEnabled: configuredBotEnabled,
+        enabled: configuredBotEnabled,
+        bot: configuredBotEnabled,
+        botAdmin,
+        metadataAvailable,
+        effectiveBotEnabled,
+        effectiveManagementEnabled,
+        effectiveFeatures,
         note: String(raw.note || ""),
         updatedAt: raw.updatedAt || null,
         updatedBy: raw.updatedBy || null,
@@ -144,9 +200,10 @@ function getEffectiveGroupConfig(groupJid) {
     }
 }
 
-function isGroupBotEnabled(groupJid) {
+function isGroupBotEnabled(groupJid, runtime = {}) {
     if (!isGroupJid(groupJid)) return true
-    return getEffectiveGroupConfig(groupJid).botEnabled !== false
+    if (typeof runtime.effectiveBotEnabled === "boolean") return runtime.effectiveBotEnabled
+    return getEffectiveGroupConfig(groupJid).configuredBotEnabled === true
 }
 
 function isInboundGroupFeatureAllowed(featureName) {
@@ -154,15 +211,19 @@ function isInboundGroupFeatureAllowed(featureName) {
     return !PRIVATE_ONLY_FEATURES.has(feature)
 }
 
-function isGroupFeatureEnabled(groupJid, featureName) {
+function isGroupFeatureEnabled(groupJid, featureName, runtime = {}) {
     if (!isGroupJid(groupJid)) return true
-    if (!isGroupBotEnabled(groupJid)) return false
+    if (!isGroupBotEnabled(groupJid, runtime)) return false
     const feature = canonicalFeatureName(featureName)
     if (PRIVATE_ONLY_FEATURES.has(feature)) return false
 
-    const effective = getEffectiveGroupConfig(groupJid)
+    const effective = getEffectiveGroupConfig(groupJid, runtime)
     if (Object.prototype.hasOwnProperty.call(DEFAULT_FEATURES, feature)) {
-        return effective.features[feature] !== false
+        if (effective.features[feature] === false) return false
+        if (groupRuntimePolicy.isAdminRequiredFeature(feature)) {
+            return effective.effectiveManagementEnabled === true
+        }
+        return true
     }
 
     return false
@@ -174,8 +235,10 @@ function isGroupAntiToxicPrivateReplyEnabled(groupJid) {
 
 function getInboundGroupPolicySummary() {
     return {
-        mode: "COMMANDS & FEATURES (NO AUTO LINK / AUTO REPLY)",
-        groupBotDefault: true,
+        mode: "DEFAULT OFF; ORDINARY FEATURES AFTER .BOT ON; MANAGEMENT ADMIN-GATED",
+        groupBotDefault: "OFF",
+        hardAdminGate: true,
+        managementAdminGate: true,
         groupAntiToxic: true,
         groupDetectLink: false,
         privateDetectLink: true,
@@ -183,6 +246,7 @@ function getInboundGroupPolicySummary() {
         groupAutoReply: false,
         groupStickerSafety: true,
         allowedInboundFeatures: Object.keys(DEFAULT_FEATURES).filter(feature => !PRIVATE_ONLY_FEATURES.has(feature)),
+        adminRequiredFeatures: [...groupRuntimePolicy.ADMIN_REQUIRED_FEATURES],
     }
 }
 
@@ -294,9 +358,15 @@ function resetGroup(groupJid) {
     return true
 }
 
-function formatEffectiveStatus(resolved, config) {
-    const botEnabled = config.botEnabled !== false
-    const featureStatus = feature => botEnabled && config.features[feature] !== false
+function formatEffectiveStatus(resolved, policy) {
+    const config = policy?.config || policy || getEffectiveGroupConfig(resolved.jid)
+    const effectiveBotEnabled = policy?.effectiveBotEnabled === true
+    const managementAllowed = policy?.managementAllowed === true
+    const featureStatus = feature => Boolean(
+        effectiveBotEnabled
+        && config.features[feature] !== false
+        && (!groupRuntimePolicy.isAdminRequiredFeature(feature) || managementAllowed)
+    )
     const antiToxic = featureStatus("antiToxic")
     const editGuardian = antiToxic && featureStatus("editGuardian")
     return [
@@ -305,8 +375,12 @@ function formatEffectiveStatus(resolved, config) {
         `Group: ${resolved.subject || resolved.jid}`,
         `ID: ${resolved.jid}`,
         resolved.code ? `Kode: ${resolved.code}` : "",
-        `Bot: ${botEnabled ? "ON" : "OFF"}`,
-        `Group Mode: ${botEnabled ? "COMMANDS & FEATURES" : "DISABLED"}`,
+        `Bot Admin: ${policy?.metadataAvailable ? (policy.botAdmin ? "YA" : "TIDAK") : "TIDAK DIKETAHUI"}`,
+        `Group Bot Config: ${config.botConfig === "DEFAULT" ? "DEFAULT (OFF)" : (config.botConfig || "DEFAULT (OFF)")}`,
+        `Effective Group Bot: ${effectiveBotEnabled ? "ON" : "OFF"}`,
+        `Bot Management Access: ${managementAllowed ? "ON (BOT ADMIN)" : "OFF"}`,
+        `Reason: ${effectiveBotEnabled ? (managementAllowed ? "OWNER ENABLED + BOT ADMIN" : "OWNER ENABLED; MANAGEMENT ADMIN-GATED") : String(policy?.reason || "runtime-policy-unavailable").toUpperCase()}`,
+        `Group Mode: ${effectiveBotEnabled ? (managementAllowed ? "ORDINARY + MANAGEMENT FEATURES" : "ORDINARY FEATURES ONLY") : "SILENT"}`,
         `Anti Kasar: ${antiToxic ? "ON" : "OFF"}`,
         `Edited Message Guardian: ${editGuardian ? "ON" : "OFF"}`,
         `Downloader Commands: ${featureStatus("downloader") ? "ON" : "OFF"}`,
@@ -318,11 +392,77 @@ function formatEffectiveStatus(resolved, config) {
         `Menu Interaktif: ${featureStatus("groupMenu") ? "ON" : "OFF"}`,
         `Kick Sticker: ${featureStatus("kickSticker") ? "ON" : "OFF"}`,
         `Broadcast: ${featureStatus("broadcast") ? "ON" : "OFF"}`,
+        `Group Utilities: ${featureStatus("groupUtilities") ? "ON" : "OFF"}`,
+        `Group Schedule: ${featureStatus("groupSchedule") ? "ON" : "OFF"}`,
+        `Group Moderation: ${featureStatus("groupModeration") ? "ON" : "OFF"}`,
+        `Group Attendance: ${featureStatus("groupAttendance") ? "ON" : "OFF"}`,
+        `Slowmode Feature: ${featureStatus("slowmode") ? "ON" : "OFF"}`,
+        `Anti-Spam Feature: ${featureStatus("antiSpam") ? "ON" : "OFF"}`,
+        `Store: ${featureStatus("store") ? "ON" : "OFF"}`,
+        `NSFW Image Moderation: ${featureStatus("nsfwModeration") ? "ON" : "OFF"}`,
         "Detect Link Otomatis: PRIVATE ONLY",
         "Auto Reply: PRIVATE ONLY",
         "Group Auto Reply: OFF",
         config.note ? `Catatan: ${config.note}` : "",
     ].filter(Boolean).join("\n")
+}
+
+function isInGroupBotControlCommand(text) {
+    return /^\.bot(?:\s|$)/i.test(String(text || "").trim())
+}
+
+async function handleInGroupBotControlCommand(sock, msg, context = {}) {
+    const groupJid = normalizeJid(context.from || msg?.key?.remoteJid)
+    const text = String(context.text || "").trim()
+    if (!isGroupJid(groupJid) || !isInGroupBotControlCommand(text)) return false
+
+    // Command ini sengaja tersedia sebelum gate Group Bot agar grup default-OFF
+    // tetap dapat diaktifkan. Selain owner, command dikonsumsi tanpa balasan.
+    if (!(context.canControlOwner || context.isOwner || msg?.key?.fromMe)) return true
+
+    const requestedAction = String(text.replace(/^\.bot\b/i, "").trim() || "status").toLowerCase()
+    const action = /^(on|off|status)$/.test(requestedAction) ? requestedAction : "help"
+    const actor = context.senderJid || context.sender || msg?.key?.participant || "owner"
+    if (action === "on") setBotEnabled(groupJid, true, actor)
+    if (action === "off") setBotEnabled(groupJid, false, actor)
+
+    if (action === "help") {
+        await sock.sendMessage(groupJid, {
+            text: "Di grup, gunakan .bot on, .bot off, atau .bot status. Pengaturan Custom Auto Reply tetap khusus private chat owner.",
+        }, {
+            quoted: msg,
+            __allowGroupControlOutput: true,
+        })
+        return true
+    }
+
+    const policy = await resolveGroupRuntimePolicy(sock, groupJid)
+    const config = policy.config || getEffectiveGroupConfig(groupJid)
+    const botOn = policy.effectiveBotEnabled === true
+    const managementOn = policy.managementAllowed === true
+    const lines = [
+        "BOT GRUP",
+        "",
+        `Status: ${botOn ? "ON" : "OFF"}`,
+        `Config: ${config.botConfig === "DEFAULT" ? "DEFAULT (OFF)" : config.botConfig}`,
+        `Bot admin: ${policy.metadataAvailable ? (policy.botAdmin ? "YA" : "TIDAK") : "TIDAK DIKETAHUI"}`,
+        `Fitur biasa: ${botOn ? "ON" : "OFF"}`,
+        `Fitur pengelolaan grup: ${managementOn ? "ON" : "OFF"}`,
+        `Welcome & goodbye: ${managementOn && config.features.welcome !== false && config.features.goodbye !== false ? "ON" : "OFF"}`,
+    ]
+    if (botOn && !managementOn) {
+        lines.push("Catatan: bot bukan admin atau metadata admin belum valid; hanya fitur biasa yang dijalankan.")
+    } else if (managementOn) {
+        lines.push("Bot terverifikasi sebagai admin; fitur pengelolaan yang dikonfigurasi ON dapat berjalan.")
+    } else {
+        lines.push("Ketik .bot on di grup ini untuk mengaktifkan bot.")
+    }
+
+    await sock.sendMessage(groupJid, { text: lines.join("\n") }, {
+        quoted: msg,
+        __allowGroupControlOutput: true,
+    })
+    return true
 }
 
 function commandHelp() {
@@ -345,9 +485,18 @@ function commandHelp() {
         ".groupctl feature <G001|group_jid> goodbye on/off",
         ".groupctl feature <G001|group_jid> groupmenu on/off",
         ".groupctl feature <G001|group_jid> kicksticker on/off",
+        ".groupctl feature <G001|group_jid> grouputilities on/off",
+        ".groupctl feature <G001|group_jid> groupschedule on/off",
+        ".groupctl feature <G001|group_jid> groupmoderation on/off",
+        ".groupctl feature <G001|group_jid> groupattendance on/off",
+        ".groupctl feature <G001|group_jid> slowmode on/off",
+        ".groupctl feature <G001|group_jid> antispam on/off",
+        ".groupctl feature <G001|group_jid> store on/off",
+        ".groupctl feature <G001|group_jid> nsfw on/off",
         ".groupctl note <G001|group_jid> <catatan>",
         "",
-        "Saat Bot group ON, command dan fitur group tetap berjalan sesuai permission/config.",
+        "Grup baru default OFF. Aktifkan dari dalam grup dengan .bot on atau lewat .groupctl on.",
+        "Saat Bot group ON, fitur biasa berjalan; fitur pengelolaan tetap memerlukan bot admin.",
         "Hanya Detect Link otomatis dan Auto Reply yang private-only.",
     ].join("\n")
 }
@@ -373,11 +522,21 @@ async function handleGroupRemoteControlCommand(sock, msg, context = {}) {
             const config = getEffectiveGroupConfig(item.jid)
             lines.push(`${code} — ${item.subject}`)
             lines.push(`ID: ${item.jid}`)
-            lines.push(`Status: ${config.botEnabled ? "aktif" : "custom / OFF"}`)
-            lines.push(`Mode: ${config.botEnabled ? "Commands & Features" : "Disabled"}`)
+            lines.push(`Config: ${config.botConfig}`)
+            lines.push("Effective: gunakan .groupctl status untuk cek admin runtime")
             lines.push("")
         }
         await sock.sendMessage(remoteJid, { text: lines.join("\n").trim() })
+        if (map.size) {
+            await sock.sendMessage(remoteJid, {
+                text: "📎 *ID SIAP DISALIN*\nSetiap pesan di bawah berisi kode + nama grup + ID. Tekan lama pesan grup yang dipilih lalu pilih *Salin*.",
+            })
+            for (const [code, item] of map) {
+                await sock.sendMessage(remoteJid, {
+                    text: `${code} — ${item.subject}\nID: ${item.jid}`,
+                })
+            }
+        }
         return true
     }
 
@@ -394,7 +553,7 @@ async function handleGroupRemoteControlCommand(sock, msg, context = {}) {
         if (!entries.length) lines.push("Belum ada custom config.")
         for (const [jid] of entries) {
             const config = getEffectiveGroupConfig(jid)
-            lines.push(`${jid} — Bot ${config.botEnabled ? "ON" : "OFF"}, Anti Kasar ${config.features.antiToxic !== false ? "ON" : "OFF"}`)
+            lines.push(`${jid} — Config ${config.botConfig}, Anti Kasar ${config.features.antiToxic !== false ? "ON" : "OFF"}`)
         }
         await sock.sendMessage(remoteJid, { text: lines.join("\n") })
         return true
@@ -409,13 +568,15 @@ async function handleGroupRemoteControlCommand(sock, msg, context = {}) {
 
     const actor = context.senderJid || context.sender || remoteJid
     if (action === "status") {
-        await sock.sendMessage(remoteJid, { text: formatEffectiveStatus(resolved, getEffectiveGroupConfig(resolved.jid)) })
+        const policy = await resolveGroupRuntimePolicy(sock, resolved.jid)
+        await sock.sendMessage(remoteJid, { text: formatEffectiveStatus(resolved, policy) })
         return true
     }
 
     if (action === "on" || action === "off") {
-        const config = setBotEnabled(resolved.jid, action === "on", actor)
-        await sock.sendMessage(remoteJid, { text: formatEffectiveStatus(resolved, config) })
+        setBotEnabled(resolved.jid, action === "on", actor)
+        const policy = await resolveGroupRuntimePolicy(sock, resolved.jid)
+        await sock.sendMessage(remoteJid, { text: formatEffectiveStatus(resolved, policy) })
         return true
     }
 
@@ -449,18 +610,26 @@ async function handleGroupRemoteControlCommand(sock, msg, context = {}) {
             await sock.sendMessage(remoteJid, { text: "Detect Link otomatis private-only dan tidak dapat diaktifkan untuk group." })
             return true
         }
-        if (!new Set(["antiToxic", "editGuardian", "privateWarn", "broadcast", "downloader", "stickerSafety", "stickerText", "stickerNsfw", "welcome", "goodbye", "groupMenu", "kickSticker", "warning"]).has(feature)) {
+        if (!new Set(["antiToxic", "editGuardian", "privateWarn", "broadcast", "downloader", "stickerSafety", "stickerText", "stickerNsfw", "welcome", "goodbye", "groupMenu", "kickSticker", "warning", "groupUtilities", "groupSchedule", "groupModeration", "groupAttendance", "slowmode", "antiSpam", "store", "nsfwModeration"]).has(feature)) {
             await sock.sendMessage(remoteJid, { text: "Fitur group tidak dikenali." })
             return true
         }
 
-        const config = setFeature(resolved.jid, feature, requested === "on", actor)
-        await sock.sendMessage(remoteJid, { text: formatEffectiveStatus(resolved, config) })
+        setFeature(resolved.jid, feature, requested === "on", actor)
+        const policy = await resolveGroupRuntimePolicy(sock, resolved.jid)
+        await sock.sendMessage(remoteJid, { text: formatEffectiveStatus(resolved, policy) })
         return true
     }
 
     await sock.sendMessage(remoteJid, { text: commandHelp() })
     return true
+}
+
+async function resolveGroupRuntimePolicy(sock, groupJid, options = {}) {
+    return groupRuntimePolicy.resolveGroupRuntimePolicy(sock, groupJid, {
+        ...options,
+        groupRemoteControl: module.exports,
+    })
 }
 
 module.exports = {
@@ -470,13 +639,16 @@ module.exports = {
     getEffectiveGroupConfig,
     getInboundGroupPolicySummary,
     getRawGroupConfig,
+    handleInGroupBotControlCommand,
     handleGroupRemoteControlCommand,
+    isInGroupBotControlCommand,
     isGroupAntiToxicPrivateReplyEnabled,
     isGroupBotEnabled,
     isGroupFeatureEnabled,
     isInboundGroupFeatureAllowed,
     loadState,
     resolveGroupTarget,
+    resolveGroupRuntimePolicy,
     saveState,
     setBotEnabled,
     setFeature,

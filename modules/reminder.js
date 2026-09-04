@@ -14,7 +14,7 @@ fs.mkdirSync(path.dirname(dbPath), { recursive: true })
 fs.mkdirSync(path.dirname(headerPath), { recursive: true })
 if (!fs.existsSync(dbPath)) fs.writeFileSync(dbPath, "[]\n", "utf8")
 if (!fs.existsSync(headerPath)) {
-    fs.writeFileSync(headerPath, "[REMINDER] *INI ADALAH PESAN OTOMATIS oleh USERBOT FAHRI*\n\n", "utf8")
+    fs.writeFileSync(headerPath, "[REMINDER] *INI ADALAH PESAN OTOMATIS oleh USERBOT*\n\n", "utf8")
 }
 
 let lastCctvLogTime = null

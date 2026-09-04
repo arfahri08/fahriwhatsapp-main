@@ -173,7 +173,7 @@ function buildQuickChartQrUrl(imageUrl) {
         finderDotStyle: "dot",
         centerImageUrl: imageUrl,
         centerImageSizeRatio: "0.28",
-        caption: "USERBOT FAHRI",
+        caption: "USERBOT",
         captionFontFamily: "sans-serif",
         captionFontSize: "28",
         captionFontColor: "111827",

@@ -59,6 +59,8 @@ test("downloader command mendapat kategori downloader", () => {
 
 test("media tool mendapat kategori media", () => {
     assert.strictEqual(limiter.classifyRequest({ text: ".stiker", isGroup: true }).category, "media")
+    assert.strictEqual(limiter.classifyRequest({ text: ".transkrip", isGroup: true }).category, "media")
+    assert.strictEqual(limiter.classifyRequest({ text: ".stt", isGroup: false }).category, "media")
 })
 
 test("OCR command mendapat kategori OCR", () => {

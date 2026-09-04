@@ -130,7 +130,7 @@ const DOWNLOADER_COMMANDS = new Set([
     ".statusget", ".getstatus", ".statuskontak", ".statuscontact",
 ])
 const MEDIA_COMMANDS = new Set([
-    ".stiker", ".nampak", ".pdf", ".vn", ".ptt", ".makeqr",
+    ".stiker", ".nampak", ".pdf", ".vn", ".ptt", ".tts", ".transkrip", ".transcript", ".stt", ".makeqr",
     ".tgstiker", ".tgstikerold", ".tgpack", ".tgsticker2",
 ])
 const OCR_COMMANDS = new Set([

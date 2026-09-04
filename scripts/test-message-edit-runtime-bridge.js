@@ -5,7 +5,7 @@ const path = require("path")
 const { EventEmitter } = require("events")
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "edit-tap-test-"))
-process.env.MESSAGE_EDIT_GUARDIAN_STATE_PATH = path.join(tempDir, "messageEditGuardian.json")
+process.env.EDIT_GUARD_DATA_FILE = path.join(tempDir, "messageEditGuardian.json")
 process.env.EDIT_TAP_TRACE_PATH = path.join(tempDir, "editEventTrace.jsonl")
 process.env.SECURITY_MEDIA_LOG_JID = "120363424006225997@g.us"
 

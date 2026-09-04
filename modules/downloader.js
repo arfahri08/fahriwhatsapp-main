@@ -4,6 +4,7 @@ const path = require("path");
 const fs = require("fs");
 const os = require("os");
 const { delay } = require("./delay");
+const { sendImageAlbum } = require("./mediaAlbum");
 
 const menuSessions = new Map();
 
@@ -17,12 +18,12 @@ const CONFIG = {
     IG_COOKIES_PATH: path.join(__dirname, "ig_cookies.txt"),
 
     // [OPSIONAL] Akun IG cadangan jika cookies tidak ada
-    IG_USERNAME: "koid.an",
-    IG_PASSWORD: "akuntumb4l",
+    IG_USERNAME: process.env.IG_USERNAME || "",
+    IG_PASSWORD: process.env.IG_PASSWORD || "",
 
     // [OPSIONAL] RapidAPI key untuk fallback berbayar (gratis 100 req/bln)
     // Daftar di: https://rapidapi.com/mrBarbwire/api/instagram-downloader3
-    RAPIDAPI_KEY: "93d13f4a3emshb898bc2fdb42656p1e6799jsne80e0fd003cc",
+    RAPIDAPI_KEY: process.env.RAPIDAPI_KEY || "",
 
     // Folder temp untuk file yang didownload yt-dlp
     TEMP_DIR: path.join(process.env.HOME || os.homedir() || process.cwd(), "wa_bot_dl"),
@@ -310,10 +311,14 @@ async function handleInteractiveDownload(sock, from, text, pushName) {
                 // --- TikTok ---
                 const result = await downloadTikTok(session.url);
                 if (result.type === "photos") {
-                    await sock.sendMessage(from, { text: `📸 *TikTok Slideshow*\n📝 ${result.title}` });
-                    for (const img of result.images) {
-                        await sock.sendMessage(from, { image: { url: img } });
-                        await delay(1500);
+                    const slideshowCaption = `✅ *TikTok Slideshow* (${result.images.length} gambar)\n📝 ${result.title || "Berhasil didownload"}`;
+                    if (result.images.length > 1) {
+                        await sendImageAlbum(sock, from, result.images, { caption: slideshowCaption });
+                    } else {
+                        await sock.sendMessage(from, {
+                            image: { url: result.images[0] },
+                            caption: slideshowCaption,
+                        });
                     }
                 } else {
                     await sock.sendMessage(from, {
@@ -370,7 +375,7 @@ async function handleInteractiveDownload(sock, from, text, pushName) {
         } catch (error) {
             console.error("[ERROR]", error);
             await sock.sendMessage(from, {
-                text: `❌ Gagal memproses:\n${error.message}\n\nCoba lagi atau pastikan link bukan private/archived.`,
+                text: "❌ Gagal memproses media. Pastikan link bersifat publik dan coba kembali beberapa saat lagi.",
             });
         } finally {
             // Hapus pesan status

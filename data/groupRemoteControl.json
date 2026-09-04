@@ -926,9 +926,9 @@
       "updatedBy": "manual-batch"
     },
     "120363424006225997@g.us": {
-      "enabled": false,
-      "botEnabled": false,
-      "bot": false,
+      "enabled": true,
+      "botEnabled": true,
+      "bot": true,
       "updatedAt": "2026-07-19T05:51:29.735897Z",
       "updatedBy": "manual-batch"
     },
