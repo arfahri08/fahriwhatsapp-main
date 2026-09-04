@@ -25,14 +25,87 @@
 
 `fahriwhatsapp-main` adalah userbot WhatsApp berbasis Node.js dengan arsitektur modular. Fitur disusun sebagai modul terpisah agar mudah dirawat, diuji, dan dinonaktifkan sesuai kebutuhan.
 
-### Fitur utama
+## Fitur unggulan
 
-- Auto-reply privat, custom reply, keyword, dan personal greeting.
-- Moderasi grup: anti-toxic, anti-flood, welcome, admin tools, polling, tagall, dan group policy.
-- Downloader dan utilitas media: sticker, image-to-PDF, audio transcription, status, view-once, serta konversi media.
-- Reminder, scheduler, broadcast terkontrol, attendance, commerce, dan contact utilities.
-- Proteksi tambahan: rate limit command, blocklist, security logging, NSFW detection, OCR, dan health check.
-- Login QR atau pairing code, reconnect otomatis, session repair, serta dukungan PM2.
+<table>
+<tr>
+<td width="50%">
+
+### 🤖 Smart automation
+
+- Auto-reply privat dengan quoted bubble dan nama personal.
+- Custom reply, keyword reply, link detector, serta menu `.help` interaktif.
+- Reminder kontak berbasis contact card dan scheduler.
+- Reconnect otomatis, health check, source watchdog, dan session repair.
+
+</td>
+<td width="50%">
+
+### 🛡️ Moderasi & keamanan
+
+- Anti-toxic, safe words, reflection profile, warning, anti-spam, dan slowmode.
+- Sticker Safety dengan OCR, NSFW scoring, warmup model, dan cache control.
+- Edited Message Guardian, Anti-Delete, View Once security log, dan media audit.
+- Blocklist, permission policy, command rate limit, serta owner/admin authorization.
+
+</td>
+</tr>
+<tr>
+<td width="50%">
+
+### 👥 Group command suite
+
+- `.gcopen`, `.gcclose`, `.gcschedule`, `.setnamegc`, `.setdeskgc`, dan `.setppgc`.
+- `.tagall`, `.hidetag`, `.poll`, `.pin`, `.adminlist`, `.groupinfo`, serta `.rules`.
+- Welcome/goodbye menu, kick sticker, attendance, group utility, dan feature toggle.
+- Mini games: quiz, tebak angka, suit, truth, dare, coinflip, dan roll.
+
+</td>
+<td width="50%">
+
+### 📥 Media & downloader
+
+- Downloader Spotify, TikTok, Instagram, Threads, YouTube, Facebook, Pinterest, dan SoundCloud.
+- Convert gambar/video ke sticker, image-to-PDF, upload media ke URL, dan QR art.
+- Voice note/text-to-speech, audio transcription, Telegram sticker, status, serta View Once.
+- Album media, local downloader, cleanup media, dan kontrol media berbasis scope.
+
+</td>
+</tr>
+<tr>
+<td width="50%">
+
+### 🛒 Store & wallet
+
+- Etalase produk melalui `.shop` atau `.store`.
+- Checkout `.beli`, status pesanan, saldo, deposit, dan riwayat saldo.
+- Owner tools untuk produk, stok, order fulfillment, deposit approval, dan saldo customer.
+- Dukungan delivery digital dengan validasi transaksi dan idempotency.
+
+</td>
+<td width="50%">
+
+### ⚡ Owner toolkit
+
+- Broadcast terkontrol dengan status, retry, delay, blacklist, dan whitelist.
+- Push kontak, backup, reaction workflow, status broadcast, serta notifikasi aktif.
+- Jadibot manager, private agent, web-to-zip, WhatsApp inspect, dan safe mockup tools.
+- Konfigurasi runtime melalui `.settings`, diagnostics, serta research lab terbatas owner.
+
+</td>
+</tr>
+</table>
+
+### Contoh command
+
+```text
+.help                         # Menu lengkap fitur
+.stikerguard scan             # Scan sticker dengan OCR dan NSFW guard
+.welcome menu on              # Aktifkan menu interaktif grup
+.poll multi Pertanyaan? | A, B, C
+.shop                         # Lihat katalog produk
+.status                       # Status bot dan koneksi
+```
 
 > Gunakan bot hanya pada akun dan grup yang Anda miliki atau yang memberi izin. Hormati Terms of Service WhatsApp, privasi pengguna, dan hukum setempat.
 
