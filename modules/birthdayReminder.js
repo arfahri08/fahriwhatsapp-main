@@ -16,7 +16,8 @@ if (!fs.existsSync(dataPath)) fs.writeFileSync(dataPath, "[]\n", "utf8")
 
 function readBirthdays() {
     try {
-        const value = JSON.parse(fs.readFileSync(dataPath, "utf8"))
+        const raw = fs.readFileSync(dataPath, "utf8").replace(/^\uFEFF/, "")
+        const value = JSON.parse(raw)
         return Array.isArray(value) ? value : []
     } catch {
         return []
