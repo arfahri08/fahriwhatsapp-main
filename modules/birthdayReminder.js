@@ -111,8 +111,8 @@ function formatEntry(entry, index) {
     return `${index + 1}. ${entry.name || "Tanpa nama"} — ${entry.nickname || "belum ada panggilan"} — ${entry.birthday || "tanggal belum diisi"}`
 }
 
-async function startFlow(sock, from) {
-    const sent = await sock.sendMessage(from, {
+async function startFlow(sock, sessionKey, chatJid) {
+    const sent = await sock.sendMessage(chatJid, {
         text: [
             "🎂 *TAMBAH REMINDER ULANG TAHUN*",
             "",
@@ -120,8 +120,8 @@ async function startFlow(sock, from) {
             "Ketik *batal* untuk membatalkan.",
         ].join("\n"),
     })
-    sessions.set(String(from).toLowerCase(), {
-        chatJid: from,
+    sessions.set(String(sessionKey).toLowerCase(), {
+        chatJid,
         stage: "contact",
         promptKey: sent?.key || null,
         updatedAt: Date.now(),
@@ -154,7 +154,7 @@ async function handleBirthdayFlow(sock, msg, context = {}) {
             })
             return true
         }
-        await startFlow(sock, replyJid)
+        await startFlow(sock, from, replyJid)
         return true
     }
 
