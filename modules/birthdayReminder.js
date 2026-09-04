@@ -231,7 +231,7 @@ function getBirthdayMessage(entry) {
     return [
         `🎂 Selamat ulang tahun, ${entry.nickname || entry.name || "kamu"}!`,
         "",
-        `Semoga panjang umur, sehat selalu, dan semua harapan baik ${entry.nickname || entry.name || "kamu"} dimudahkan.`,
+        "Semoga panjang umur, sehat selalu, dan semua harapan baik selalu dimudahkan.",
         "Have a wonderful birthday! 🎉",
     ].join("\n")
 }
