@@ -60,6 +60,7 @@ data/stats.json
 data/statusInbox.json
 data/reactionActions.json
 data/reminder.json
+data/birthday.json
 data/blocklist.json
 crm.json
 

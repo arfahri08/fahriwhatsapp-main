@@ -36,6 +36,7 @@
 - Auto-reply privat dengan quoted bubble dan nama personal.
 - Custom reply, keyword reply, link detector, serta menu `.help` interaktif.
 - Reminder kontak berbasis contact card dan scheduler.
+- Birthday reminder tahunan pukul 06:30 WIB dengan nama panggilan personal.
 - Reconnect otomatis, health check, source watchdog, dan session repair.
 
 </td>
@@ -105,7 +106,21 @@
 .poll multi Pertanyaan? | A, B, C
 .shop                         # Lihat katalog produk
 .status                       # Status bot dan koneksi
+.hbd                          # Tambah birthday reminder via wizard
+.hbd list                     # Lihat daftar birthday lokal
 ```
+
+### Birthday reminder
+
+Fitur birthday memakai database lokal `data/birthday.json` yang sengaja di-ignore Git karena berisi nomor kontak pribadi. Jalankan `.hbd` dari private chat owner, lalu ikuti wizard:
+
+1. Kirim contact card target.
+2. Kirim nama panggilan yang ingin dibaca bot, misalnya `bunda`, `My day 1`, `Suk`, `jerii`, atau `ii`.
+3. Kirim tanggal ulang tahun dengan format `DD-MM`, misalnya `07-09`.
+
+Bot mengirim ucapan otomatis setiap tahun pada `06:30 WIB` menggunakan zona waktu `Asia/Jakarta`. `.hbd list` menampilkan data lokal dan tanggal yang masih kosong. Jika tanggal belum diisi, bot tidak mengirim apa pun.
+
+Nama panggilan default lokal sudah disiapkan untuk `Jco -> My day 1`, `Bu Merry -> i Merry`, `Bunda Artha -> bunda`, `Papi Bian/Stefanus/Steven -> Suk`, `Jeri a.k.a Jeffrey -> jerii`, dan `I Linda -> ii`. Nomor kontak tidak ikut dipush ke GitHub.
 
 > Gunakan bot hanya pada akun dan grup yang Anda miliki atau yang memberi izin. Hormati Terms of Service WhatsApp, privasi pengguna, dan hukum setempat.
 

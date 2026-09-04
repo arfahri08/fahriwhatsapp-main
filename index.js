@@ -45,6 +45,7 @@ const targetedStatusDownloader = require("./modules/targetedStatusDownloader")
 const statusInbox = require("./modules/statusInbox")
 const incomingMediaLogger = require("./modules/incomingMediaLogger")
 const reminder = require("./modules/reminder");
+const birthdayReminder = require("./modules/birthdayReminder");
 const reminderContactFlow = require("./modules/reminderContactFlow");
 const contactNameStore = require("./modules/contactNameStore");
 const help = require("./modules/help");
@@ -3101,6 +3102,7 @@ async function startBot() {
                 reminderInterval = setInterval(async () => {
                     try {
                         await reminder.checkAndSendReminders(sock);
+                        await birthdayReminder.checkAndSendBirthdays(sock);
                     } catch (error) {
                         console.log(`[Reminder] Error: ${error.message}`);
                     }
@@ -3688,6 +3690,14 @@ async function startBot() {
             reminder,
         }))
         if (reminderContactFlowHandled) return
+
+        const birthdayReminderHandled = await routerTrace.run(msg, traceContext, "birthdayReminder", () => birthdayReminder.handleBirthdayFlow(sock, msg, {
+            from,
+            text,
+            isGroup,
+            isOwner: canControlOwner,
+        }))
+        if (birthdayReminderHandled) return
 
         const sendAutoReplyWithForward = async (replyMessage, originalText = text) => {
             if (!autoReply.shouldProcessMessage(msg, { botEnabled: botStatus.getStatus() })) return false
