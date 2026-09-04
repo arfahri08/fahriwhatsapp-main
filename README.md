@@ -107,7 +107,7 @@
 .shop                         # Lihat katalog produk
 .status                       # Status bot dan koneksi
 .hbd                          # Tambah birthday reminder via wizard
-.hbd list                     # Lihat daftar birthday lokal
+.hbd list / .hbd status      # Lihat daftar dan status birthday lokal
 ```
 
 ### Birthday reminder

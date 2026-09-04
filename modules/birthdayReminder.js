@@ -132,13 +132,20 @@ async function handleBirthdayFlow(sock, msg, context = {}) {
     const text = String(context.text || extractMessageText(msg?.message)).trim()
     if (!from || context.isGroup || !context.isOwner) return false
 
-    if (/^\.hbd(?:\s+list)?$/i.test(text)) {
-        if (/\s+list$/i.test(text)) {
+    if (/^\.hbd(?:\s+(?:list|status))?$/i.test(text)) {
+        if (/\s+(?:list|status)$/i.test(text)) {
             const entries = readBirthdays()
+            const configured = entries.filter(entry => normalizeDate(entry.birthday)).length
             await sock.sendMessage(from, {
                 text: entries.length
-                    ? ["🎂 *DAFTAR REMINDER ULANG TAHUN*", "", ...entries.map(formatEntry)].join("\n")
-                    : "Belum ada data ulang tahun.",
+                    ? [
+                        "🎂 *STATUS BIRTHDAY REMINDER*",
+                        "",
+                        `Status: AKTIF | Waktu: 06:30 WIB | Data tanggal: ${configured}/${entries.length}`,
+                        "",
+                        ...entries.map(formatEntry),
+                    ].join("\n")
+                    : "Belum ada data ulang tahun lokal.",
             })
             return true
         }

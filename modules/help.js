@@ -130,7 +130,7 @@ function generateHelpMenu() {
         "Header reminder existing tidak berubah.",
         "🎂 *BIRTHDAY REMINDER — OWNER PRIVATE*",
         ".hbd — kirim contact card, isi nama panggilan, lalu tanggal DD-MM.",
-        ".hbd list — lihat daftar birthday lokal dan status tanggalnya.",
+        ".hbd list / .hbd status — lihat daftar birthday lokal dan status tanggalnya.",
         "Ucapan dikirim otomatis setiap tahun pukul 06:30 WIB.",
         "",
         "⚡ *OWNER TOOLS — PRIVATE CHAT*",
