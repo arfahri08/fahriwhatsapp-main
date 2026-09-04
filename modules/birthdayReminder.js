@@ -130,6 +130,10 @@ async function startFlow(sock, from) {
 
 async function handleBirthdayFlow(sock, msg, context = {}) {
     const from = String(context.from || msg?.key?.remoteJid || "")
+    const senderJid = String(context.senderJid || "")
+    const replyJid = /@lid$/i.test(from) && /@(s\.whatsapp\.net|hosted)$/i.test(senderJid)
+        ? senderJid
+        : from
     const text = String(context.text || extractMessageText(msg?.message)).trim()
     if (!from || context.isGroup || !context.isOwner) return false
 
@@ -137,7 +141,7 @@ async function handleBirthdayFlow(sock, msg, context = {}) {
         if (/\s+(?:list|status)$/i.test(text)) {
             const entries = readBirthdays()
             const configured = entries.filter(entry => normalizeDate(entry.birthday)).length
-            await sock.sendMessage(from, {
+            await sock.sendMessage(replyJid, {
                 text: entries.length
                     ? [
                         "🎂 *STATUS BIRTHDAY REMINDER*",
@@ -150,7 +154,7 @@ async function handleBirthdayFlow(sock, msg, context = {}) {
             })
             return true
         }
-        await startFlow(sock, from)
+        await startFlow(sock, replyJid)
         return true
     }
 

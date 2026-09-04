@@ -3696,6 +3696,7 @@ async function startBot() {
             text,
             isGroup,
             isOwner: canControlOwner,
+            senderJid,
         }))
         if (birthdayReminderHandled) return
 
