@@ -3114,6 +3114,8 @@ async function startBot() {
             // Aktifkan handler telepon untuk socket yang sedang aktif.
             callHandler.handleCall(sock, {
                 ownerJids: [getOwnerControlJid(), ...PRIORITY_USERS].filter(Boolean),
+                contactNameStore,
+                lidAliasStore,
             });
 
             mediaCleanupManager.init(sock, {
