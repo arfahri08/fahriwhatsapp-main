@@ -6,10 +6,26 @@ const reminderContactFlow = require("./reminderContactFlow")
 
 const dataPath = path.resolve(process.env.BIRTHDAY_DATA_FILE || path.join(__dirname, "../data/birthday.json"))
 const timeZone = String(process.env.BIRTHDAY_TIMEZONE || "Asia/Jakarta").trim() || "Asia/Jakarta"
-const sendHour = Number(process.env.BIRTHDAY_HOUR || 6)
-const sendMinute = Number(process.env.BIRTHDAY_MINUTE || 30)
+function normalizeSendTime(hourValue, minuteValue) {
+    const hour = Number(hourValue)
+    const minute = Number(minuteValue)
+    if (!Number.isInteger(hour) || !Number.isInteger(minute) || minute < 0 || minute > 59) {
+        return { hour: 0, minute: 0 }
+    }
+    if (hour === 24 && minute === 0) return { hour: 0, minute: 0 }
+    if (hour < 0 || hour > 23) return { hour: 0, minute: 0 }
+    return { hour, minute }
+}
+
+const sendTime = normalizeSendTime(process.env.BIRTHDAY_HOUR || 0, process.env.BIRTHDAY_MINUTE || 0)
+const sendHour = sendTime.hour
+const sendMinute = sendTime.minute
 const sessions = new Map()
 let activeRun = null
+
+function formatSendTime() {
+    return `${String(sendHour).padStart(2, "0")}:${String(sendMinute).padStart(2, "0")}`
+}
 
 fs.mkdirSync(path.dirname(dataPath), { recursive: true })
 if (!fs.existsSync(dataPath)) fs.writeFileSync(dataPath, "[]\n", "utf8")
@@ -146,7 +162,7 @@ async function handleBirthdayFlow(sock, msg, context = {}) {
                     ? [
                         "🎂 *STATUS BIRTHDAY REMINDER*",
                         "",
-                        `Status: AKTIF | Waktu: 06:30 WIB | Data tanggal: ${configured}/${entries.length}`,
+                        `Status: AKTIF | Waktu: ${formatSendTime()} WIB | Data tanggal: ${configured}/${entries.length}`,
                         "",
                         ...entries.map(formatEntry),
                     ].join("\n")
@@ -230,7 +246,7 @@ async function handleBirthdayFlow(sock, msg, context = {}) {
             `Target: ${next.name}`,
             `Panggilan: ${next.nickname}`,
             `Tanggal: ${next.birthday}`,
-            "Waktu kirim: *06:30 WIB* setiap tahun.",
+            `Waktu kirim: *${formatSendTime()} WIB* setiap tahun.`,
         ].join("\n"))
         sessions.delete(from.toLowerCase())
         return true
@@ -250,27 +266,32 @@ function getBirthdayMessage(entry) {
 
 async function runBirthdayCheck(sock, now = new Date()) {
     const local = getZonedParts(now)
-    if (local.hour !== sendHour || local.minute !== sendMinute) return { sent: 0, skipped: 0 }
+    const currentMinutes = local.hour * 60 + local.minute
+    const sendAtMinutes = sendHour * 60 + sendMinute
+    if (currentMinutes < sendAtMinutes) return { sent: 0, skipped: 0 }
     const entries = readBirthdays()
     let sent = 0
     let skipped = 0
-    const updated = entries.map(entry => {
+    const updated = []
+    for (const entry of entries) {
         const birthday = normalizeDate(entry.birthday)
         if (!birthday || birthday !== `${String(local.day).padStart(2, "0")}-${String(local.month).padStart(2, "0")}` || String(entry.lastSentYear || "") === String(local.year)) {
             skipped += 1
-            return entry
+            updated.push(entry)
+            continue
         }
         try {
-            sock.sendMessage(entry.jid || `${normalizeNumber(entry.number)}@s.whatsapp.net`, { text: getBirthdayMessage(entry) })
-                .then(() => {})
-                .catch(error => console.log(`[BIRTHDAY] Gagal kirim ${entry.name || entry.number}: ${String(error.message || error).slice(0, 160)}`))
+            const number = normalizeNumber(entry.jid || entry.number)
+            if (!number) throw new Error("nomor WhatsApp tidak valid")
+            await sock.sendMessage(`${number}@s.whatsapp.net`, { text: getBirthdayMessage(entry) })
             sent += 1
-            return { ...entry, lastSentYear: local.year }
+            updated.push({ ...entry, lastSentYear: local.year })
         } catch (error) {
             console.log(`[BIRTHDAY] Gagal proses ${entry.name || entry.number}: ${String(error.message || error).slice(0, 160)}`)
-            return entry
+            skipped += 1
+            updated.push(entry)
         }
-    })
+    }
     if (sent) writeBirthdays(updated)
     return { sent, skipped }
 }
