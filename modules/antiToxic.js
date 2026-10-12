@@ -2754,7 +2754,7 @@ async function findToxicMatchWithTranslation(text) {
     };
 }
 
-async function findContextAwareToxicMatch(text, context = {}) {
+async function findContextAwareToxicMatch(text, context = {}, options = {}) {
     const lexicalMatch = findToxicMatch(text);
     const classifierContext = {
         ...context,
@@ -2763,6 +2763,18 @@ async function findContextAwareToxicMatch(text, context = {}) {
     const localSafeResult = antiToxicContext.classifyLocalSafeContext(text, classifierContext);
     if (localSafeResult) {
         return antiToxicContext.applyContextDecision(text, lexicalMatch, localSafeResult);
+    }
+
+    // Auto Reply private harus responsif. Jika matcher lokal tidak menemukan
+    // kandidat kasar, jangan tahan reply hanya untuk scan AI/translate jaringan.
+    // Pesan dengan kandidat kasar dan seluruh pesan grup tetap memakai jalur
+    // pemeriksaan konteks lengkap di bawah ini.
+    if (options.skipRemoteWhenNoLexical === true && !lexicalMatch.word) {
+        return {
+            ...lexicalMatch,
+            detectionSource: "fast-private-clean",
+            checkedText: text,
+        };
     }
 
     const contextResult = await antiToxicContext.classifyToxicContext(text, classifierContext);
@@ -4608,7 +4620,11 @@ async function handleToxicCheckInner(msg, sock, ownerJid, options = {}) {
 
     const toxicMatch = isStickerOcr
         ? await findToxicMatchWithTranslation(text)
-        : await findContextAwareToxicMatch(text, getContextClassifierMetadata(msg, remoteJid));
+        : await findContextAwareToxicMatch(
+            text,
+            getContextClassifierMetadata(msg, remoteJid),
+            { skipRemoteWhenNoLexical: options.skipRemoteWhenNoLexical === true }
+        );
     const triggeredWord = toxicMatch.matchedAlias || toxicMatch.word;
     const canonicalWord = toxicMatch.word;
     debugAntiToxic("match-result", {

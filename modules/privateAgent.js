@@ -105,8 +105,11 @@ function isShortAcknowledgement(text) {
 
 function mentionReplyName(jid, fallback = "Kak") {
     try {
+        if (typeof contactNameStore.resolveSavedContactFirstName === "function") {
+            return contactNameStore.resolveSavedContactFirstName(jid) || fallback
+        }
         if (typeof contactNameStore.resolveSavedContactName === "function") {
-            return contactNameStore.resolveSavedContactName(jid) || fallback
+            return contactNameStore.extractSavedContactFirstName?.(contactNameStore.resolveSavedContactName(jid)) || fallback
         }
     } catch {}
     return fallback
@@ -175,9 +178,11 @@ function fallbackResponse(text, context, contactName) {
 }
 
 function buildResponse(text, jid) {
-    const contact = privateStore.getContact(jid)
     const context = privateStore.getContext(jid)
-    return fallbackResponse(text, context, contact?.name || mentionReplyName(jid))
+    // Nama konfigurasi Private Agent dapat berasal dari input manual. Sapaan
+    // harus tetap memakai nama kontak yang benar-benar tersimpan di akun bot.
+    const contactFirstName = mentionReplyName(jid)
+    return fallbackResponse(text, context, contactFirstName)
 }
 
 async function handlePrivateAgent(sock, msg, context = {}) {

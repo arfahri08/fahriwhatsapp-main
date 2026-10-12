@@ -38,15 +38,21 @@ function getContactJidCandidates(msg, options = {}) {
 
 function resolvePersonalName(msg, options = {}) {
     const contactStore = options.contactNameStore
-    if (contactStore && typeof contactStore.resolveContactName === "function") {
-        for (const jid of getContactJidCandidates(msg, options)) {
+    const candidates = getContactJidCandidates(msg, options)
+    if (contactStore && typeof contactStore.resolveSavedContactFirstName === "function") {
+        try {
+            return String(contactStore.resolveSavedContactFirstName(candidates) || "").trim()
+        } catch {}
+    }
+    if (contactStore && typeof contactStore.resolveSavedContactName === "function") {
+        for (const jid of candidates) {
             try {
-                const savedName = String(contactStore.resolveContactName(jid, []) || "").trim()
+                const savedName = String(contactStore.resolveSavedContactName(jid) || "").trim()
                 if (savedName) return savedName
             } catch {}
         }
     }
-    return String(msg?.pushName || "").trim()
+    return ""
 }
 
 function getFirstName(msg, options = {}) {
@@ -54,9 +60,12 @@ function getFirstName(msg, options = {}) {
         .normalize("NFKC")
         .replace(/\s+/g, " ")
         .trim()
-    if (!personalName) return "kamu"
-    const first = personalName.split(" ")[0].replace(/[^\p{L}\p{N}._'-]/gu, "").slice(0, 30)
-    return first || "kamu"
+    if (!personalName) return "Kak"
+    for (const token of personalName.split(" ")) {
+        const first = token.replace(/[^\p{L}\p{N}._'-]/gu, "").slice(0, 30)
+        if (first && /\p{L}/u.test(first) && !/whatsapp|\.net$|^lid$/i.test(first)) return first
+    }
+    return "Kak"
 }
 
 function getTimeGreeting(date = new Date()) {
@@ -82,26 +91,27 @@ function renderPersonalText(value, msg, options = {}) {
     if (!original) return original
 
     const name = getFirstName(msg, options)
+    const displayName = name === "Kak" ? "*Kak*" : name
     const greeting = getTimeGreeting()
     let text = original
-        .replace(/\{\{?\s*(?:name|firstName)\s*\}?\}/gi, name)
+        .replace(/\{\{?\s*(?:name|firstName)\s*\}?\}/gi, displayName)
         .replace(/\{\{?\s*greeting\s*\}?\}/gi, greeting)
 
     const personalNameEnabled = options.personalizeName !== false
         && envEnabled(process.env.AUTO_REPLY_PERSONAL_NAME, true)
-    if (!personalNameEnabled || name === "kamu" || text !== original) return text
+    if (!personalNameEnabled || text !== original) return text
 
     if (/^halo\b/i.test(text)) {
-        return text.replace(/^halo\s*[,!.-]?\s*/i, `Halo, ${name}! `)
+        return text.replace(/^halo\s*[,!.-]?\s*/i, `Halo, ${displayName}! `)
     }
 
     const greetingPattern = /^(selamat\s+(?:dini\s+hari|pagi|siang|sore|malam))\s*[,!.-]?\s*/i
     const greetingMatch = text.match(greetingPattern)
     if (greetingMatch) {
-        return text.replace(greetingPattern, `${greetingMatch[1]}, ${name}. `)
+        return text.replace(greetingPattern, `${greetingMatch[1]}, ${displayName}. `)
     }
 
-    if (options.prependName === true) return `Hai ${name}, ${text}`
+    if (options.prependName === true) return `Hai ${displayName}, ${text}`
     return text
 }
 
@@ -117,11 +127,24 @@ function canQuoteMessage(msg) {
     return Boolean(msg?.key?.id && msg?.key?.remoteJid && msg?.message)
 }
 
+async function updateTypingPresence(sock, state, remoteJid) {
+    if (typeof sock?.sendPresenceUpdate !== "function") return false
+    try {
+        await sock.sendPresenceUpdate(state, remoteJid)
+        return true
+    } catch {
+        // Presence hanya feedback visual; kegagalannya tidak boleh menahan balasan.
+        return false
+    }
+}
+
 function getAutoReplyPresentationHealth() {
     return {
         quotedBubble: envEnabled(process.env.AUTO_REPLY_QUOTED_BUBBLE, true),
         personalName: envEnabled(process.env.AUTO_REPLY_PERSONAL_NAME, true),
         savedContactNamePriority: true,
+        savedContactNameOnly: true,
+        pushNameFallback: false,
         placeholderSupport: true,
     }
 }
@@ -164,9 +187,16 @@ async function sendAutoReply(sock, remoteJid, replyMessage, options = {}) {
         ? { quoted: sourceMessage }
         : undefined
 
-    const result = sendOptions
-        ? await sock.sendMessage(targetJid, content, sendOptions)
-        : await sock.sendMessage(targetJid, content)
+    // Tidak ada artificial delay: kirim status typing, lalu langsung kirim reply.
+    await updateTypingPresence(sock, "composing", targetJid)
+    let result
+    try {
+        result = sendOptions
+            ? await sock.sendMessage(targetJid, content, sendOptions)
+            : await sock.sendMessage(targetJid, content)
+    } finally {
+        await updateTypingPresence(sock, "paused", targetJid)
+    }
 
     const replyText = content.text || content.caption || "[media/non-text reply]"
     await sendOwnerNotification(sock, {

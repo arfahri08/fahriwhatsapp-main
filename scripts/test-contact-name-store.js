@@ -24,6 +24,8 @@ try {
     assert.equal(store.resolveContactName("123456789012345@lid"), "Mama Rumah")
     assert.equal(store.resolveSavedContactName("628111111111@s.whatsapp.net"), "Mama Rumah")
     assert.equal(store.resolveSavedContactName("123456789012345@lid"), "Mama Rumah")
+    assert.equal(store.resolveSavedContactFirstName("628111111111@s.whatsapp.net"), "Mama")
+    assert.equal(store.resolveSavedContactFirstName(["123456789012345@lid", "628111111111@s.whatsapp.net"]), "Mama")
 
     result = store.rememberIncomingMessage({
         key: { participant: "628111111111@s.whatsapp.net" },
@@ -41,6 +43,10 @@ try {
     })
     assert.equal(store.resolveContactName("628333333333@s.whatsapp.net"), "Nama Profil Saja")
     assert.equal(store.resolveSavedContactName("628333333333@s.whatsapp.net"), "", "pushName tidak boleh dianggap nama kontak")
+    assert.equal(store.resolveSavedContactFirstName("628333333333@s.whatsapp.net"), "", "nama depan tidak boleh berasal dari pushName")
+
+    store.rememberContact({ id: "628444444444@s.whatsapp.net", name: "6211 I Linda", notify: "Nama WA Lain" })
+    assert.equal(store.resolveSavedContactFirstName("628444444444@s.whatsapp.net"), "I", "token nomor pada nama kontak harus dilewati")
 
     assert(fs.existsSync(process.env.CONTACT_NAME_STORE_FILE), "contact cache should persist")
     console.log("CONTACT_NAME_STORE_TESTS_OK")

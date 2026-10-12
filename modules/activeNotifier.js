@@ -19,19 +19,10 @@ function getConfiguredNotificationGroupJid() {
     return botNotificationTarget.validateBotNotificationGroupJid?.(target) ? target : ""
 }
 
-function getFallbackPrivateJid(legacyFallbackTargets = []) {
-    const candidates = [...new Set((legacyFallbackTargets || []).map(normalizeJid).filter(Boolean))]
-    return candidates.find(jid => jid.endsWith("@s.whatsapp.net"))
-        || candidates.find(jid => !jid.endsWith("@g.us") && jid !== "status@broadcast" && !jid.endsWith("@newsletter"))
-        || ""
-}
-
-function getTargets(legacyFallbackTargets = []) {
+function getTargets() {
     if (!isActiveNotificationEnabled()) return []
     const configuredGroup = getConfiguredNotificationGroupJid()
-    if (configuredGroup) return [configuredGroup]
-    const privateFallback = getFallbackPrivateJid(legacyFallbackTargets)
-    return privateFallback ? [privateFallback] : []
+    return configuredGroup ? [configuredGroup] : []
 }
 
 function formatJakartaTime(date = new Date()) {
@@ -51,14 +42,14 @@ function getActiveText(date = new Date()) {
     )
 }
 
-async function notifyActive(sock, legacyFallbackTargets = [], options = {}) {
+async function notifyActive(sock, _legacyFallbackTargets = [], options = {}) {
     if (!isActiveNotificationEnabled()) return []
 
     const cooldownMs = Number(process.env.ACTIVE_NOTIFY_COOLDOWN_MS || DEFAULT_COOLDOWN_MS)
     const now = Date.now()
     if (!options.force && cooldownMs > 0 && now - lastSentAt < cooldownMs) return []
 
-    const targets = getTargets(legacyFallbackTargets)
+    const targets = getTargets()
     if (!targets.length) {
         console.log("[ACTIVE] Target log aktif tidak tersedia.")
         return []
@@ -70,20 +61,15 @@ async function notifyActive(sock, legacyFallbackTargets = [], options = {}) {
 
     for (const jid of targets) {
         try {
-            let sent
-            if (jid.endsWith("@g.us") && typeof botNotificationTarget.sendBotNotification === "function") {
-                sent = await botNotificationTarget.sendBotNotification(sock, content, {
-                    type: options.reason || "active-startup-reconnect",
-                })
-            } else {
-                sent = await sock.sendMessage(jid, content)
-            }
+            const sent = await botNotificationTarget.sendBotNotification(sock, content, {
+                type: options.reason || "active-startup-reconnect",
+            })
             if (!sent) continue
             results.push({ jid, key: sent?.key || null })
             console.log("[ACTIVE] Log aktif terkirim", {
                 jid,
                 type: options.reason || "active-startup-reconnect",
-                target: jid.endsWith("@g.us") ? "configured-group" : "private-fallback",
+                target: "configured-group",
             })
         } catch (error) {
             console.log("[ACTIVE] Gagal mengirim log aktif", {
@@ -100,6 +86,5 @@ module.exports = {
     notifyActive,
     getTargets,
     getConfiguredNotificationGroupJid,
-    getFallbackPrivateJid,
     getActiveText,
 }

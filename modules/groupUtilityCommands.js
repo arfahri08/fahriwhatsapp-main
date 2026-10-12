@@ -9,9 +9,14 @@ const SUBJECT_MAX = 100
 const DESCRIPTION_MAX = 2048
 const POLL_QUESTION_MAX = 255
 const POLL_OPTION_MAX = 100
+const TAGALL_OUTPUT_BYPASS_OPTION = "__selfTagallOutput"
 
 function isGroupUtilityCommand(text) {
     return COMMAND_PATTERN.test(String(text || "").trim())
+}
+
+function isTagallCommand(text) {
+    return /^\.tagall(?:\s|$)/i.test(String(text || "").trim())
 }
 
 async function sendPermissionDenied(sock, groupJid, msg) {
@@ -165,10 +170,53 @@ async function handlePoll(sock, msg, access, text) {
 async function handleTagall(sock, msg, access, argument) {
     const mentions = buildParticipantMentions(access.policy.metadata, sock, access.context)
     const labels = mentions.map(jid => `@${groupRuntimePolicy.jidUser(jid)}`).join(" ")
-    const prefix = argument.trim()
-    const text = [prefix, labels].filter(Boolean).join("\n") || "Tag semua anggota"
-    await sock.sendMessage(access.groupJid, { text, mentions }, { quoted: msg })
+    const inlineText = argument.trim()
+
+    if (inlineText) {
+        const sent = await sock.sendMessage(access.groupJid, {
+            text: `@all\n${inlineText}`,
+            mentions,
+        }, { [TAGALL_OUTPUT_BYPASS_OPTION]: true })
+        if (sent) {
+            await sock.sendMessage(access.groupJid, {
+                delete: { ...msg.key, remoteJid: access.groupJid },
+            }, { [TAGALL_OUTPUT_BYPASS_OPTION]: true })
+        }
+        return true
+    }
+
+    await sock.sendMessage(access.groupJid, {
+        text: labels.split(" ").filter(Boolean).join("\n"),
+        mentions,
+        edit: { ...msg.key, remoteJid: access.groupJid },
+    }, { [TAGALL_OUTPUT_BYPASS_OPTION]: true })
     return true
+}
+
+async function resolveTagallAccess(sock, msg, context = {}) {
+    const groupJid = groupRuntimePolicy.normalizeJid(context.from || msg?.key?.remoteJid)
+    if (!groupRuntimePolicy.isGroupJid(groupJid)) return null
+
+    try {
+        const metadataResolver = typeof sock?.__resolveGroupMetadataForRuntimePolicy === "function"
+            ? sock.__resolveGroupMetadataForRuntimePolicy.bind(sock)
+            : sock?.groupMetadata?.bind(sock)
+        const metadata = await metadataResolver?.(groupJid)
+        if (!metadata || !Array.isArray(metadata.participants)) return null
+        return {
+            allowed: true,
+            hardDenied: false,
+            groupJid,
+            policy: { metadata },
+            context,
+        }
+    } catch (error) {
+        console.log("[TAGALL] Metadata grup tidak tersedia", {
+            groupJid,
+            error: String(error?.message || error).slice(0, 180),
+        })
+        return null
+    }
 }
 
 async function handleHidetag(sock, msg, access, argument, context) {
@@ -199,6 +247,20 @@ async function handleGroupUtilityCommand(sock, msg, context = {}) {
     if (!isGroupUtilityCommand(text)) return false
     const command = text.split(/\s+/)[0].toLowerCase()
     const argument = text.slice(command.length).trim()
+    if (command === ".tagall") {
+        if (msg?.key?.fromMe !== true) return true
+        const tagallAccess = await resolveTagallAccess(sock, msg, context)
+        if (!tagallAccess) return true
+        try {
+            return await handleTagall(sock, msg, tagallAccess, argument)
+        } catch (error) {
+            console.log("[TAGALL] Gagal mengirim mention; command dipertahankan", {
+                groupJid: tagallAccess.groupJid,
+                error: String(error?.message || error).slice(0, 240),
+            })
+            return true
+        }
+    }
     const access = await common.resolveCommandAccess(sock, msg, FEATURE_NAME, context)
     if (access.hardDenied) return true
     if (!access.allowed) {
@@ -216,7 +278,6 @@ async function handleGroupUtilityCommand(sock, msg, context = {}) {
         }
         if (command === ".pin") return handlePin(sock, msg, access, argument)
         if (command === ".poll") return handlePoll(sock, msg, access, text)
-        if (command === ".tagall") return handleTagall(sock, msg, access, argument)
         if (command === ".hidetag") return handleHidetag(sock, msg, access, argument, context)
     } catch (error) {
         console.log("[GROUP UTILITY] Command gagal", {
@@ -236,10 +297,12 @@ module.exports = {
     POLL_OPTION_MAX,
     POLL_QUESTION_MAX,
     SUBJECT_MAX,
+    TAGALL_OUTPUT_BYPASS_OPTION,
     buildHidetagMediaContent,
     buildParticipantMentions,
     handleGroupUtilityCommand,
     isGroupUtilityCommand,
+    isTagallCommand,
     parsePoll,
     validatePoll,
 }

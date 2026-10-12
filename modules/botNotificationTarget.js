@@ -1,6 +1,5 @@
 "use strict"
 
-const DEFAULT_BOT_NOTIFICATION_GROUP_JID = "120363424006225997@g.us"
 const DEFAULT_RETRY_ATTEMPTS = 2
 const DEFAULT_RETRY_DELAY_MS = 800
 
@@ -29,18 +28,25 @@ function validateBotNotificationGroupJid(value) {
 
 function getBotNotificationGroupJid() {
     const configured = String(process.env.BOT_NOTIFICATION_GROUP_JID || "").trim()
-    if (!configured) return DEFAULT_BOT_NOTIFICATION_GROUP_JID
+    if (!configured) {
+        if (!warnedInvalidTarget) {
+            warnedInvalidTarget = true
+            console.log("[BOT NOTIFICATION] BOT_NOTIFICATION_GROUP_JID belum tersedia; notifikasi dilewati.")
+        }
+        return ""
+    }
     if (validateBotNotificationGroupJid(configured)) return configured
 
     if (!warnedInvalidTarget) {
         warnedInvalidTarget = true
-        console.log(`[BOT NOTIFICATION] BOT_NOTIFICATION_GROUP_JID tidak valid, memakai default ${DEFAULT_BOT_NOTIFICATION_GROUP_JID}`)
+        console.log("[BOT NOTIFICATION] BOT_NOTIFICATION_GROUP_JID tidak valid; notifikasi dilewati.")
     }
-    return DEFAULT_BOT_NOTIFICATION_GROUP_JID
+    return ""
 }
 
 function isBotNotificationGroup(jid) {
-    return String(jid || "").trim() === getBotNotificationGroupJid()
+    const targetJid = getBotNotificationGroupJid()
+    return Boolean(targetJid && String(jid || "").trim() === targetJid)
 }
 
 async function sendBotNotification(sock, content, options = {}) {
@@ -48,6 +54,10 @@ async function sendBotNotification(sock, content, options = {}) {
     if (!content || typeof content !== "object") return false
 
     const targetJid = getBotNotificationGroupJid()
+    if (!targetJid) {
+        console.log("[BOT NOTIFICATION] Target grup belum tersedia; pengiriman dilewati.")
+        return false
+    }
     const attempts = Math.max(1, Math.min(3, Number(options.attempts || DEFAULT_RETRY_ATTEMPTS)))
     const retryDelayMs = Math.max(0, Number(options.retryDelayMs || DEFAULT_RETRY_DELAY_MS))
     const type = clip(options.type || "notification", 80)
@@ -75,7 +85,7 @@ async function sendBotNotification(sock, content, options = {}) {
 
 function getBotNotificationHealth() {
     return {
-        enabled: true,
+        enabled: Boolean(getBotNotificationGroupJid()),
         targetJid: getBotNotificationGroupJid(),
         activeNotification: "GROUP ONLY",
         restartNotification: "GROUP ONLY",
@@ -196,7 +206,6 @@ async function handleBotNotificationCommand(sock, msg, context = {}) {
 }
 
 module.exports = {
-    DEFAULT_BOT_NOTIFICATION_GROUP_JID,
     validateBotNotificationGroupJid,
     getBotNotificationGroupJid,
     isBotNotificationGroup,

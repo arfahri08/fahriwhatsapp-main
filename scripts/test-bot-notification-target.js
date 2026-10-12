@@ -24,10 +24,22 @@ function createSock() {
 async function main() {
     delete process.env.BOT_NOTIFICATION_GROUP_JID
 
-    assert.strictEqual(botNotificationTarget.getBotNotificationGroupJid(), GROUP_JID)
+    assert.strictEqual(botNotificationTarget.getBotNotificationGroupJid(), "")
     assert.strictEqual(botNotificationTarget.validateBotNotificationGroupJid(GROUP_JID), true)
     assert.strictEqual(botNotificationTarget.validateBotNotificationGroupJid(OWNER_JID), false)
 
+    const missingTargetSock = createSock()
+    const skipped = await activeNotifier.notifyActive(missingTargetSock, [OWNER_JID], { force: true })
+    assert.deepStrictEqual(skipped, [])
+    assert.strictEqual(missingTargetSock.sent.length, 0, "target kosong wajib skip tanpa fallback private")
+
+    process.env.BOT_NOTIFICATION_GROUP_JID = OWNER_JID
+    const invalidTargetSock = createSock()
+    const invalidTarget = await activeNotifier.notifyActive(invalidTargetSock, [OWNER_JID], { force: true })
+    assert.deepStrictEqual(invalidTarget, [])
+    assert.strictEqual(invalidTargetSock.sent.length, 0, "target private/invalid wajib skip")
+
+    process.env.BOT_NOTIFICATION_GROUP_JID = GROUP_JID
     const activeSock = createSock()
     const active = await activeNotifier.notifyActive(activeSock, [OWNER_JID], { force: true })
     assert.strictEqual(active.length, 1)

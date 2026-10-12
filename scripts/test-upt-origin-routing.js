@@ -6,7 +6,7 @@ const path = require("path")
 
 async function run() {
     const root = path.join(__dirname, "..")
-    const indexSource = fs.readFileSync(path.join(root, "index.js"), "utf8")
+    const indexSource = fs.readFileSync(path.join(root, "index.js"), "utf8").replace(/\r\n/g, "\n")
 
     assert.ok(indexSource.includes("// UPT_ORIGIN_ROUTING_BUILD: V1.3.3"))
     assert.ok(indexSource.includes("function shouldEditActiveNoticeToHelp() {\n    return true\n}"))
@@ -25,13 +25,8 @@ async function run() {
 
     const botNotificationTarget = require("../modules/botNotificationTarget")
     let activeNotifier = require("../modules/activeNotifier")
-    const defaultGroup = botNotificationTarget.getBotNotificationGroupJid()
-
-    assert.ok(defaultGroup.endsWith("@g.us"))
-    assert.deepStrictEqual(
-        activeNotifier.getTargets(["628111111111@s.whatsapp.net"]),
-        [defaultGroup]
-    )
+    assert.strictEqual(botNotificationTarget.getBotNotificationGroupJid(), "")
+    assert.deepStrictEqual(activeNotifier.getTargets(["628111111111@s.whatsapp.net"]), [])
 
     const defaultGroupSent = []
     await activeNotifier.notifyActive({
@@ -40,8 +35,7 @@ async function run() {
             return { key: { id: "GR-DEFAULT", remoteJid: jid } }
         },
     }, ["628111111111@s.whatsapp.net"], { force: true, reason: "test-default-group" })
-    assert.strictEqual(defaultGroupSent.length, 1)
-    assert.strictEqual(defaultGroupSent[0].jid, defaultGroup)
+    assert.strictEqual(defaultGroupSent.length, 0, "target kosong tidak boleh fallback ke private")
 
     process.env.BOT_NOTIFICATION_GROUP_JID = "120363123456789000@g.us"
     delete require.cache[modulePath]
@@ -73,7 +67,7 @@ async function run() {
     try {
         assert.deepStrictEqual(
             activeNotifier.getTargets(["628111111111@s.whatsapp.net"]),
-            ["628111111111@s.whatsapp.net"]
+            []
         )
     } finally {
         targetModule.getBotNotificationGroupJid = originalGetTarget

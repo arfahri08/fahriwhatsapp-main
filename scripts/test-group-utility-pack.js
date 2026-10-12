@@ -1,5 +1,7 @@
 "use strict"
 
+const fs = require("fs")
+const path = require("path")
 const {
     ADMIN_JID,
     BOT_JID,
@@ -90,20 +92,79 @@ async function runPollTests() {
 }
 
 async function runTagTests() {
-    const sock = makeSock()
-    await utility.handleGroupUtilityCommand(sock, makeMsg(".tagall Rapat dimulai"), makeContext(".tagall Rapat dimulai"))
-    const tag = sock.calls.send.find(call => Array.isArray(call.content.mentions) && call.content.text.includes("Rapat dimulai"))
-    assert(tag, "tagall harus mengirim mentions")
+    const memberSock = makeSock()
+    const memberHandled = await utility.handleGroupUtilityCommand(
+        memberSock,
+        makeMsg(".tagall dilarang", { fromMe: false }),
+        makeContext(".tagall dilarang")
+    )
+    assert.strictEqual(memberHandled, true, "command anggota dikenali lalu diabaikan")
+    assert.strictEqual(memberSock.calls.send.length, 0, "anggota lain tidak boleh mendapat balasan")
+    assert.strictEqual(memberSock.calls.metadata, 0, "command anggota tidak perlu mengambil metadata")
+
+    const sock = makeSock({ botAdmin: false })
+    const inlineMsg = makeMsg(".tagall halo", { fromMe: true, id: "tagall-inline" })
+    await utility.handleGroupUtilityCommand(
+        sock,
+        inlineMsg,
+        makeContext(".tagall halo", { remote: makeRemote({ botEnabled: false }) })
+    )
+    const tag = sock.calls.send.find(call => Array.isArray(call.content.mentions))
+    assert(tag, "tagall harus tetap berjalan saat bot bukan admin dan Group Bot OFF")
+    assert.strictEqual(tag.content.text, "@all\nhalo")
+    assert.strictEqual(tag.options?.[utility.TAGALL_OUTPUT_BYPASS_OPTION], true, "output tagall harus melewati gate grup DEFAULT OFF")
+    assert.strictEqual(tag.options?.quoted, undefined, "bubble tagall inline tidak boleh quoted")
     assert.strictEqual(tag.content.mentions.filter(jid => jid === USER_PN).length, 1, "LID+PN user yang sama hanya sekali")
     assert(!tag.content.mentions.includes(BOT_JID), "akun bot harus dihilangkan dari tagall")
+    const inlineDelete = sock.calls.send.find(call => call.content.delete)
+    assert(inlineDelete, "command inline harus dihapus setelah mention berhasil")
+    assert.strictEqual(inlineDelete.content.delete.id, inlineMsg.key.id)
+    assert.strictEqual(inlineDelete.options?.[utility.TAGALL_OUTPUT_BYPASS_OPTION], true, "delete command tagall juga harus melewati output gate")
+
+    const editSock = makeSock({ botAdmin: false })
+    const editMsg = makeMsg(".tagall", {
+        fromMe: true,
+        id: "tagall-edit",
+        quoted: { id: "quoted-original", participant: USER_LID },
+    })
+    await utility.handleGroupUtilityCommand(
+        editSock,
+        editMsg,
+        makeContext(".tagall", { remote: makeRemote({ botEnabled: false }) })
+    )
+    assert.strictEqual(editSock.calls.send.length, 1, "mode edit tidak boleh membuat bubble atau delete tambahan")
+    const edited = editSock.calls.send[0]
+    assert.deepStrictEqual(edited.content.edit, { ...editMsg.key, remoteJid: GROUP_JID })
+    assert.strictEqual(edited.content.delete, undefined, "mode edit tidak boleh mengirim delete")
+    assert(!edited.content.text.includes("@all"), "mode edit tidak boleh menampilkan @all")
+    assert(edited.content.text.split("\n").every(line => /^@\d+$/.test(line)), "mode edit harus berisi mention satu per baris")
+    assert.strictEqual(edited.options?.[utility.TAGALL_OUTPUT_BYPASS_OPTION], true, "edit tagall harus melewati output gate grup DEFAULT OFF")
+    assert.strictEqual(editMsg.message.extendedTextMessage.contextInfo.stanzaId, "quoted-original", "edit mempertahankan bubble command yang memiliki hubungan reply")
+
+    const failureSock = makeSock()
+    failureSock.sendMessage = async () => { throw new Error("send mention gagal") }
+    await utility.handleGroupUtilityCommand(
+        failureSock,
+        makeMsg(".tagall gagal", { fromMe: true, id: "tagall-failed" }),
+        makeContext(".tagall gagal")
+    )
+    assert.strictEqual(failureSock.calls.send.some(call => call.content.delete), false, "command tidak boleh dihapus jika mention gagal")
+
+    const indexSource = fs.readFileSync(path.join(__dirname, "..", "index.js"), "utf8")
+    const fastRouteAt = indexSource.indexOf("if (isGroup && isMe && groupUtilityCommands.isTagallCommand(text))")
+    const groupGateAt = indexSource.indexOf("inboundGroupPolicy = await groupRuntimePolicy.resolveGroupRuntimePolicy", fastRouteAt)
+    assert(fastRouteAt >= 0 && groupGateAt > fastRouteAt, "runtime harus memproses self tagall sebelum gate admin/Group Bot")
+    assert(indexSource.includes("if (isSelfTagallOutput)"), "output gate harus memiliki bypass khusus self tagall")
+    assert(indexSource.includes("delete options[groupUtilityCommands.TAGALL_OUTPUT_BYPASS_OPTION]"), "marker internal tagall harus dibuang sebelum dikirim ke Baileys")
 
     const mediaMsg = makeMsg(".hidetag pengumuman", {
         quoted: { id: "quoted-image", participant: USER_LID, message: { imageMessage: { mimetype: "image/jpeg" } } },
     })
-    await utility.handleGroupUtilityCommand(sock, mediaMsg, makeContext(".hidetag pengumuman", {
+    const hidetagSock = makeSock()
+    await utility.handleGroupUtilityCommand(hidetagSock, mediaMsg, makeContext(".hidetag pengumuman", {
         extra: { downloadMedia: async () => Buffer.from("hidden-image") },
     }))
-    const hidden = sock.calls.send.find(call => Buffer.isBuffer(call.content.image))
+    const hidden = hidetagSock.calls.send.find(call => Buffer.isBuffer(call.content.image))
     assert(hidden, "hidetag reply image harus mempertahankan media")
     assert.strictEqual(hidden.content.caption, "pengumuman")
     assert.strictEqual(hidden.content.mentions.filter(jid => jid === USER_PN).length, 1)

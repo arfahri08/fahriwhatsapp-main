@@ -7,6 +7,7 @@ const path = require("path")
 const autoReply = require("../modules/autoReply")
 const autoReplyScope = require("../modules/autoReplyScope")
 const autoReplyForwarder = require("../modules/autoReplyForwarder")
+const botNotificationTarget = require("../modules/botNotificationTarget")
 const customAutoReply = require("../modules/customAutoReply")
 const groupRemoteControl = require("../modules/groupRemoteControl")
 const healthCheck = require("../modules/healthCheck")
@@ -20,6 +21,7 @@ const PRIVATE_JID = "628111111111@s.whatsapp.net"
 const GROUP_JID = "120363000000000000@g.us"
 const OWNER_JID = "6288287764273@s.whatsapp.net"
 const NOTIFICATION_GROUP_JID = "120363424006225997@g.us"
+process.env.BOT_NOTIFICATION_GROUP_JID = NOTIFICATION_GROUP_JID
 
 function message(remoteJid, content, key = {}) {
     return {
@@ -185,6 +187,7 @@ test("15. private Forwarder memakai quoted bubble dan tetap mengirim notificatio
         ownerJids: [OWNER_JID],
         quotedBubble: true,
         personalizeName: true,
+        contactNameStore: { resolveSavedContactFirstName: () => "Budi" },
     })
     assert.ok(result)
     const privateReply = sent.find(item => item.jid === PRIVATE_JID)
@@ -257,9 +260,8 @@ test("23. help menjelaskan kebijakan Auto Reply dan group", () => {
     assert.ok(text.includes("Auto Reply hanya bekerja melalui private chat."))
     assert.ok(text.includes("Notifikasi Auto Reply Forwarder dikirim ke grup notification, bukan PM owner."))
     assert.ok(text.includes("Keyword Reply otomatis hanya bekerja di private chat."))
-    assert.ok(text.includes("Grup baru selalu Bot group OFF"))
-    assert.ok(text.includes("Owner mengaktifkannya dengan `.bot on`"))
-    assert.ok(text.includes("fitur biasa dapat dipakai"))
+    assert.ok(text.includes(".bot on/off/status"))
+    assert.ok(text.includes("nama depan kontak yang tersimpan di HP akun bot"))
 })
 
 test("24. health menampilkan scope dan aman saat status gagal dibaca", async () => {
@@ -268,7 +270,10 @@ test("24. health menampilkan scope dan aman saat status gagal dibaca", async () 
     process.env.YTDLP_BIN = "missing-auto-reply-test-ytdlp"
     process.env.FFMPEG_BIN = "missing-auto-reply-test-ffmpeg"
     try {
-        const onText = await healthCheck.buildHealthText({ autoReply: { getStatus: () => true } })
+        const onText = await healthCheck.buildHealthText({
+            autoReply: { getStatus: () => true },
+            botNotificationTarget,
+        })
         assert.ok(onText.includes("Auto Reply Global: ON"))
         assert.ok(onText.includes("Auto Reply Scope: PRIVATE ONLY"))
         assert.ok(onText.includes("Private Auto Reply: ON"))
@@ -279,7 +284,10 @@ test("24. health menampilkan scope dan aman saat status gagal dibaca", async () 
         assert.ok(onText.includes("Private Owner Notification: OFF"))
         assert.ok(onText.includes("Keyword Auto Reply: PRIVATE ONLY"))
 
-        const unknownText = await healthCheck.buildHealthText({ autoReply: { getStatus: () => { throw new Error("test") } } })
+        const unknownText = await healthCheck.buildHealthText({
+            autoReply: { getStatus: () => { throw new Error("test") } },
+            botNotificationTarget,
+        })
         assert.ok(unknownText.includes("Auto Reply Global: UNKNOWN"))
         assert.ok(unknownText.includes("Private Auto Reply: UNKNOWN"))
     } finally {
@@ -318,8 +326,9 @@ test("26. command .reply owner hanya merespons di private", async () => {
 
 test("27. Auto Reply personalizer mendukung placeholder dan prefix nama", () => {
     const msg = privateText("halo", { pushName: "Siti Rahma" })
-    assert.strictEqual(autoReplyForwarder.renderPersonalText("Halo, {name}!", msg), "Halo, Siti!")
-    assert.ok(autoReplyForwarder.renderPersonalText("Pesan diterima", msg, { prependName: true }).startsWith("Hai Siti,"))
+    const options = { contactNameStore: { resolveSavedContactFirstName: () => "Siti" } }
+    assert.strictEqual(autoReplyForwarder.renderPersonalText("Halo, {name}!", msg, options), "Halo, Siti!")
+    assert.ok(autoReplyForwarder.renderPersonalText("Pesan diterima", msg, { ...options, prependName: true }).startsWith("Hai Siti,"))
     assert.ok(!autoReplyForwarder.renderPersonalText("Halo, {name}!", msg).includes("{name}"))
 })
 
@@ -341,7 +350,7 @@ test("29. Auto Reply memprioritaskan nama kontak tersimpan dan hanya memakai kat
     const sent = []
     const source = privateText("pesan", { pushName: "Nama Profil WhatsApp" })
     const contactNameStore = {
-        resolveContactName: jid => jid === PRIVATE_JID ? "I Linda" : "",
+        resolveSavedContactFirstName: jids => jids.includes(PRIVATE_JID) ? "I" : "",
     }
     const sock = { sendMessage: async (jid, content, options) => { sent.push({ jid, content, options }); return {} } }
 
@@ -367,20 +376,24 @@ test("29. Auto Reply memprioritaskan nama kontak tersimpan dan hanya memakai kat
     assert.strictEqual(privateReply?.content?.text, "Selamat pagi, I. Pesan kamu sudah diterima.")
 })
 
-test("30. Auto Reply fallback ke nama profil WhatsApp jika kontak belum tersimpan", () => {
+test("30. Auto Reply tidak memakai nama profil WhatsApp jika kontak belum tersimpan", () => {
     const msg = privateText("halo", { pushName: "Siti Rahma" })
-    const contactNameStore = { resolveContactName: () => "" }
+    const contactNameStore = { resolveSavedContactFirstName: () => "" }
     assert.strictEqual(autoReplyForwarder.getFirstName(msg, {
         senderJid: PRIVATE_JID,
         contactNameStore,
-    }), "Siti")
+    }), "Kak")
+    assert.strictEqual(autoReplyForwarder.renderPersonalText("Hai {name}!", msg, {
+        senderJid: PRIVATE_JID,
+        contactNameStore,
+    }), "Hai *Kak*!")
 })
 
 test("31. Auto Reply dapat menemukan nama kontak melalui kandidat alias nomor", () => {
     const lid = "123456789012345@lid"
     const msg = message(lid, { conversation: "halo" }, { pushName: "Nama WA" })
     const contactNameStore = {
-        resolveContactName: jid => jid === PRIVATE_JID ? "I Linda" : "",
+        resolveSavedContactFirstName: jids => jids.includes(PRIVATE_JID) ? "I" : "",
     }
     assert.strictEqual(autoReplyForwarder.getFirstName(msg, {
         senderJid: lid,

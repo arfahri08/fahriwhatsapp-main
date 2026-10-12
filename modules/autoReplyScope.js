@@ -9,6 +9,14 @@ const DISALLOWED_MESSAGE_KEYS = new Set([
     "messageHistoryBundle",
     "senderKeyDistributionMessage",
 ])
+const AUTO_REPLY_MEDIA_KEYS = new Set([
+    "imageMessage",
+    "videoMessage",
+    "audioMessage",
+    "documentMessage",
+    "stickerMessage",
+    "ptvMessage",
+])
 
 function normalizeJid(value) {
     return String(value || "").trim().toLowerCase()
@@ -40,6 +48,11 @@ function hasDisallowedMessageType(msg) {
     return Object.keys(message).some(key => DISALLOWED_MESSAGE_KEYS.has(key))
 }
 
+function hasAutoReplyableMedia(msg) {
+    const message = getMessageContent(msg)
+    return Object.keys(message).some(key => AUTO_REPLY_MEDIA_KEYS.has(key))
+}
+
 function shouldProcessAutoReplyMessage(msg) {
     const remoteJid = normalizeJid(msg?.key?.remoteJid)
     if (!isPrivateChatJid(remoteJid)) return false
@@ -68,6 +81,7 @@ function getAutoReplyScope(remoteJid) {
 module.exports = {
     getAutoReplyScope,
     getMessageContent,
+    hasAutoReplyableMedia,
     hasDisallowedMessageType,
     isPrivateChatJid,
     shouldProcessAutoReplyMessage,

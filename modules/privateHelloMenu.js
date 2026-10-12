@@ -242,7 +242,7 @@ async function handlePrivateHello(sock, msg, context = {}) {
         return true
     }
 
-    const displayName = context.displayName || msg?.pushName || "Kak"
+    const displayName = context.displayName || "Kak"
     const originalJid = normalizeJid(context.from || msg?.key?.remoteJid)
     console.log("[PRIVATE HELLO MENU] ROUTE", {
         build: HELLO_BUILD,

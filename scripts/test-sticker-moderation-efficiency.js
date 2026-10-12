@@ -17,8 +17,8 @@ async function main() {
 
     assert(indexSource.includes("stickerSafetyGuardBackground"));
     assert(indexSource.includes("antiToxicStickerBackground"));
-    assert(indexSource.includes("if (isStickerMediaMessage) return"));
-    ok("sticker moderation no longer blocks main router");
+    assert(indexSource.includes("if (isStickerMediaMessage && !autoReply.shouldProcessMessage(msg"));
+    ok("sticker moderation stays in background while private auto-reply remains reachable");
 
     assert(ocrSource.includes("extractFramesWithImageMagick"));
     assert(ocrSource.includes("animatedFfmpegFallback"));

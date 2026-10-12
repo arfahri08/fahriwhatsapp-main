@@ -54,6 +54,10 @@ function shouldProcessMessage(msg, options = {}) {
     })
 }
 
+function hasAutoReplyableMedia(msg) {
+    return autoReplyScope.hasAutoReplyableMedia(msg)
+}
+
 function getScopeStatus() {
     const enabled = getStatus()
     return {
@@ -73,6 +77,7 @@ module.exports = {
     DATA_FILE,
     getScopeStatus,
     getStatus,
+    hasAutoReplyableMedia,
     load,
     save,
     setStatus,

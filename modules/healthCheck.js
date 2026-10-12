@@ -115,7 +115,7 @@ async function buildHealthText(services = {}) {
         `Rate OCR Cooldown: ${rateLimit?.cooldowns?.ocr != null ? `${Math.ceil(rateLimit.cooldowns.ocr / 1000)} detik` : "-"}`,
         `Rate Blocked Runtime: ${rateLimit?.blocked ?? 0}`,
         "",
-        `Bot Notification Target: ${notification?.targetJid || "120363424006225997@g.us"}`,
+        `Bot Notification Target: ${notification?.targetJid || "belum dikonfigurasi"}`,
         `Active Notification: ${notification?.activeNotification || "GROUP ONLY"}`,
         `Restart Notification: ${notification?.restartNotification || "GROUP ONLY"}`,
         `Reconnect Notification: ${notification?.reconnectNotification || "GROUP ONLY"}`,

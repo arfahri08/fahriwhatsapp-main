@@ -3,7 +3,11 @@ const path = require("path")
 const contactNameStore = require("./contactNameStore")
 const lidAliasStore = require("./lidAliasStore")
 
-const DEFAULT_SECURITY_MEDIA_LOG_JID = "120363424006225997@g.us"
+const DEFAULT_SECURITY_MEDIA_LOG_JID = [
+    process.env.SECURITY_MEDIA_LOG_JID,
+    process.env.BOT_NOTIFICATION_GROUP_JID,
+].map(value => String(value || "").trim().toLowerCase())
+    .find(value => /^\d+@g\.us$/i.test(value)) || ""
 const SECURITY_LOG_BUILD = "2026-07-21.6"
 const STATE_PATH = path.resolve(process.env.SECURITY_MEDIA_LOG_STATE_PATH || path.join(__dirname, "../data/securityMediaLog.json"))
 const DEFAULT_DEDUPE_TTL_MS = 5 * 60 * 1000

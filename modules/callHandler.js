@@ -137,10 +137,15 @@ function getAudioMimeType(filePath) {
 
 function getSavedCallerFirstName(jid, options = {}) {
     const contactStore = options.contactNameStore;
-    if (!contactStore || typeof contactStore.resolveSavedContactName !== "function") return "Kak";
-
     const provided = Array.isArray(options.contactJids) ? options.contactJids : [options.contactJids];
     const candidates = [...new Set([jid, ...provided].map(normalizeUserJid).filter(Boolean))];
+    if (contactStore && typeof contactStore.resolveSavedContactFirstName === "function") {
+        try {
+            return String(contactStore.resolveSavedContactFirstName(candidates) || "").trim() || "Kak";
+        } catch {}
+    }
+    if (!contactStore || typeof contactStore.resolveSavedContactName !== "function") return "Kak";
+
     for (const candidate of candidates) {
         try {
             const savedName = String(contactStore.resolveSavedContactName(candidate) || "")
@@ -559,34 +564,32 @@ function inheritAnsweredCallEvidence(call, session) {
     return marker;
 }
 
-function getOwnerJid(sock, ownerJids = []) {
-    return normalizeUserJid(
-        process.env.CALL_OWNER_JID ||
-        process.env.OWNER_JID ||
-        ownerJids.find(Boolean) ||
-        sock.user?.id ||
-        sock.authState?.creds?.me?.id
-    );
+function getConnectedBotJid(sock) {
+    for (const candidate of [sock?.user?.id, sock?.authState?.creds?.me?.id]) {
+        const jid = normalizeUserJid(candidate);
+        if (jid && getMentionNumber(jid)) return jid;
+    }
+    return "";
 }
 
 function getMentionNumber(jid) {
     return String(jid || "").split("@")[0].split(":")[0].replace(/[^0-9]/g, "");
 }
 
-function getMissedCallReply(sock, ownerJids = []) {
-    const ownerJid = getOwnerJid(sock, ownerJids);
-    const ownerNumber = getMentionNumber(ownerJid);
+function getMissedCallReply(sock) {
+    const botJid = getConnectedBotJid(sock);
+    const botNumber = getMentionNumber(botJid);
 
-    if (!ownerJid || !ownerNumber) {
+    if (!botJid || !botNumber) {
         return {
-            text: "Maaf, owner tidak bisa dihubungi lewat telepon saat ini. Silakan hubungi melalui chat.",
+            text: "Maaf, akun ini tidak bisa dihubungi lewat telepon saat ini. Silakan hubungi melalui chat.",
             mentions: [],
         };
     }
 
     return {
-        text: `Maaf, @${ownerNumber} tidak bisa dihubungi lewat telepon saat ini. Silakan hubungi melalui chat😉👌.`,
-        mentions: [ownerJid],
+        text: `Maaf, @${botNumber} tidak bisa dihubungi lewat telepon saat ini. Silakan hubungi melalui chat😉👌.`,
+        mentions: [botJid],
     };
 }
 
@@ -925,7 +928,7 @@ async function sendMissedReply(sock, call, session, options) {
             if (!replyResult.sent) throw replyResult.error || new Error("Audio panggilan pertama gagal dikirim");
             rememberFirstVoice(replyJid);
         } else {
-            await sock.sendMessage(replyJid, getMissedCallReply(sock, options.ownerJids));
+            await sock.sendMessage(replyJid, getMissedCallReply(sock));
             rememberRepeatedMissedCall(replyJid);
             replyResult = { sent: true, mode: "warning" };
         }
@@ -1157,6 +1160,7 @@ module.exports = {
         stateFile: null,
     }),
     _getCallerReplyModeForTest: getCallerReplyMode,
+    _getMissedCallReplyForTest: getMissedCallReply,
     _renderFirstVoiceTextForTest: renderFirstVoiceText,
     _prepareFirstVoiceAudioForTest: prepareFirstVoiceAudio,
     _sendFirstVoiceReplyForTest: sendFirstVoiceReply,

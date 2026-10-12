@@ -17,7 +17,6 @@ const PDFDocument = require("pdfkit")
 const path = require("path")
 const sticker = require("./modules/sticker")
 const afk = require("./modules/afk")
-const { delay } = require("./modules/delay")
 const keywords = require("./modules/keywords")
 const blocklist = require("./modules/blocklist")
 const scheduler = require("./modules/scheduler")
@@ -106,6 +105,7 @@ const messageEditGuardian = require("./modules/messageEditGuardian");
 const messageEditRuntimeBridge = require("./modules/messageEditRuntimeBridge");
 const loginManager = require("./modules/login");
 const backup = require("./modules/backup");
+const sourceWatchdog = require("./modules/sourceWatchdog");
 
 // Persisted blast jobs never resume implicitly after process startup.
 controlledBroadcast.markRestartPaused()
@@ -685,7 +685,7 @@ async function handleLegacyDownloaderCommand(sock, msg, context = {}) {
     }
 
     if (/^[123]$/.test(text) && legacyDownloaderCommandSessions.has(context.from)) {
-        const handled = await legacyDownloader.handleInteractiveDownload(sock, context.from, text, msg.pushName)
+        const handled = await legacyDownloader.handleInteractiveDownload(sock, context.from, text, context.contactFirstName || "Kak")
         if (handled || text === "3") legacyDownloaderCommandSessions.delete(context.from)
         return handled
     }
@@ -707,7 +707,7 @@ async function handleLegacyDownloaderCommand(sock, msg, context = {}) {
         return true
     }
 
-    const handled = await legacyDownloader.handleInteractiveDownload(sock, context.from, url, msg.pushName)
+    const handled = await legacyDownloader.handleInteractiveDownload(sock, context.from, url, context.contactFirstName || "Kak")
     if (handled) {
         legacyDownloaderCommandSessions.set(context.from, {
             expiresAt: now + LEGACY_DOWNLOADER_SESSION_TTL_MS,
@@ -730,7 +730,7 @@ async function handleLegacyTelegramStickerCommand(sock, msg, context = {}) {
     }
 
     const transformedText = `.tgstiker ${url}`
-    return legacyTgSticker.handleTgStickerMessage(sock, context.from, transformedText, msg, msg.pushName)
+    return legacyTgSticker.handleTgStickerMessage(sock, context.from, transformedText, msg, context.contactFirstName || "Kak")
 }
 
 function canSendScheduledBroadcastTo(targetJid) {
@@ -2426,6 +2426,11 @@ function wrapSendMessageForGroups(sock) {
         jid = String(jid || "").trim()
         options = options || {}
         content = content || {}
+        const isSelfTagallOutput = options[groupUtilityCommands.TAGALL_OUTPUT_BYPASS_OPTION] === true
+        if (isSelfTagallOutput) {
+            options = { ...options }
+            delete options[groupUtilityCommands.TAGALL_OUTPUT_BYPASS_OPTION]
+        }
         const securityPayloadRoute = securityMediaLog.getSecurityPayloadRoute(content)
         if (securityPayloadRoute && !securityMediaLog.isSecurityLogChat(jid)) {
             console.log("[SECURITY LOG ROUTE] Legacy outbound dialihkan ke grup log.", {
@@ -2452,6 +2457,13 @@ function wrapSendMessageForGroups(sock) {
         // Route group messages ke direct handler ala PrimonProto.
         if (isGroupJid(jid)) {
             try {
+                // .tagall dari akun userbot sengaja tersedia di setiap grup,
+                // termasuk grup baru yang masih DEFAULT OFF. Marker internal sudah
+                // dibuang di atas sehingga tidak ikut dikirim ke Baileys.
+                if (isSelfTagallOutput) {
+                    console.log("[GROUP OUTPUT GATE] bypass self tagall", { groupJid: jid })
+                    return await sendMessageWithSessionRepair(sock, originalSendMessage, jid, content, options)
+                }
                 return await sendGroupMessageSafely(sock, originalSendMessage, jid, content, options)
             } catch (error) {
                 console.log("[GROUP SEND] Direct group send gagal", {
@@ -3125,14 +3137,14 @@ async function startBot() {
                 scanIntervalMs: Number(process.env.MEDIA_CLEANUP_SCAN_INTERVAL_MS || 60 * 60 * 1000),
             });
 
-            // Log aktif tetap dikirim ke target notification yang dikonfigurasi.
-            // Bila target belum diatur, activeNotifier memakai PM owner sebagai fallback.
+            // Log aktif hanya dikirim ke grup notification yang dikonfigurasi.
+            // Target kosong/tidak valid dilewati tanpa fallback private.
             // Respons command .upt/.reset tetap diedit pada chat asal command.
             const commandRestartPending = hasRestartNotice()
             const sendActiveNoticeAndHelp = async () => {
                 await activeNotifier.notifyActive(
                     sock,
-                    [getOwnerControlJid(), ...PRIORITY_USERS].filter(Boolean),
+                    [],
                     {
                         force: true,
                         reason: commandRestartPending
@@ -3542,14 +3554,37 @@ async function startBot() {
         const isMe = msg.key.fromMe
         const isGroup = from.includes("@g.us")
         const senderJid = getMessageSenderJid(msg, sock)
+        const senderContactJids = [
+            senderJid,
+            msg?.key?.participantAlt,
+            msg?.key?.participant,
+            msg?.participantAlt,
+            msg?.participant,
+            msg?.key?.remoteJidAlt,
+            from,
+        ].filter(Boolean)
+        let savedContactFirstName = "Kak"
+        try {
+            savedContactFirstName = contactNameStore.resolveSavedContactFirstName(senderContactJids) || "Kak"
+        } catch {}
         const isOwner = isMe || PRIORITY_USERS.includes(senderJid) || PRIORITY_USERS.includes(from)
         const canControlOwner = isOwner || isOwnerControlMessage(msg, senderJid, from)
-        const incomingMessage = msg.message || {}
-        const hasIncomingImage = Boolean(incomingMessage.imageMessage)
-        const shouldAutoReplyForMedia = hasIncomingImage
+        const shouldAutoReplyForMedia = autoReply.hasAutoReplyableMedia(msg)
         const text = getAntiToxicBasicText(msg)
         const commandText = text.toLowerCase()
         const isAntiToxicOwnerCommand = isAntiToxicOwnerCommandText(text)
+        const autoReplyTypingStarted = autoReply.shouldProcessMessage(msg, {
+            botEnabled: botStatus.getStatus(),
+        })
+        if (autoReplyTypingStarted) {
+            try {
+                // Beri feedback secepat pesan diterima. Balasan tetap melewati router
+                // agar command dan fitur private lain tidak tertimpa Auto Reply.
+                await sock.sendPresenceUpdate("composing", from)
+            } catch (error) {
+                console.log(`[AUTO REPLY] Gagal menampilkan typing: ${String(error?.message || error).slice(0, 180)}`)
+            }
+        }
         const traceContext = {
             from,
             text,
@@ -3571,6 +3606,30 @@ async function startBot() {
                 skipped: true,
                 reason: "private-only",
             })
+        }
+
+        // .tagall milik akun userbot harus tetap berjalan di semua grup,
+        // termasuk saat Group Bot OFF atau akun bot bukan admin. Jalur khusus
+        // ini ditempatkan sebelum gate runtime grup yang memang fail-closed.
+        if (isGroup && isMe && groupUtilityCommands.isTagallCommand(text)) {
+            const tagallHandled = await routerTrace.run(msg, traceContext, "selfTagall", () => (
+                groupUtilityCommands.handleGroupUtilityCommand(sock, msg, {
+                    from,
+                    text,
+                    sender: senderJid,
+                    senderJid,
+                    isGroup,
+                    isOwner,
+                    canControlOwner,
+                    ownerJid: getOwnerControlJid(),
+                    isOwnerJid,
+                    groupRemoteControl,
+                    lidAliasStore,
+                    baileys,
+                    isBotGeneratedMessage,
+                })
+            ))
+            if (tagallHandled) return
         }
 
         let inboundGroupPolicy = null
@@ -3708,6 +3767,9 @@ async function startBot() {
                 msg,
                 originalText,
                 ownerJids: ownerForwardJids,
+                senderJid,
+                contactJids: senderContactJids,
+                contactNameStore,
                 quotedBubble: true,
                 personalizeName: true,
                 prependName: true,
@@ -3759,6 +3821,7 @@ async function startBot() {
             isOwner: canControlOwner,
             canControlOwner,
             ownerJid: getOwnerControlJid(),
+            contactFirstName: savedContactFirstName,
             isOwnerJid,
             groupRemoteControl,
             lidAliasStore,
@@ -3799,7 +3862,7 @@ async function startBot() {
                 text,
                 isGroup,
                 botStatus: botStatus.getStatus(),
-                displayName: msg?.pushName || contactNameStore.resolveContactName?.(senderJid, []) || "Kak",
+                displayName: savedContactFirstName,
                 baileys,
             }))
             if (privateHelloHandled) return
@@ -3996,6 +4059,9 @@ async function startBot() {
 
             const runAntiToxicCheck = () => routerTrace.run(msg, traceContext, isStickerMediaMessage ? "antiToxicStickerBackground" : "antiToxic", () => antiToxic.handleToxicCheck(msg, sock, getOwnerControlJid(), {
                 groupPrivateReply: isGroup && groupRemoteControl.isGroupAntiToxicPrivateReplyEnabled(from),
+                // Chat private Auto Reply yang bersih secara lokal tidak perlu
+                // menunggu request Gemini/translate sebelum balasan dikirim.
+                skipRemoteWhenNoLexical: !isGroup && autoReplyTypingStarted,
             }))
 
             if (isStickerMediaMessage) {
@@ -4041,9 +4107,11 @@ async function startBot() {
             void startBackgroundStickerSafety()
         }
 
-        // Sticker sudah masuk jalur moderasi background. Jangan teruskan ke router
-        // command/download lain yang tidak relevan.
-        if (isStickerMediaMessage) return
+        // Sticker tetap dimoderasi di background. Hanya sticker private yang memang
+        // memenuhi scope auto-reply yang diteruskan sampai fallback balasan.
+        if (isStickerMediaMessage && !autoReply.shouldProcessMessage(msg, {
+            botEnabled: botStatus.getStatus(),
+        })) return
         if (toxicHandled) return
 
         const rateLimitCommandHandled = await routerTrace.run(msg, traceContext, "commandRateLimiterCommand", () => commandRateLimiter.handleRateLimitCommand(sock, msg, {
@@ -4274,6 +4342,7 @@ async function startBot() {
                 from,
                 text,
                 isGroup,
+                contactFirstName: savedContactFirstName,
             }))
             if (legacyDownloaderHandled) return
         }
@@ -4282,6 +4351,7 @@ async function startBot() {
             from,
             text,
             isGroup,
+            contactFirstName: savedContactFirstName,
         }))
         if (legacyTelegramStickerHandled) return
 
@@ -4476,7 +4546,7 @@ async function startBot() {
                     participant: msg?.key?.participant,
                     participantAlt: msg?.key?.participantAlt,
                 })
-                localDownload = await routerTrace.run(msg, traceContext, "localDownloader", () => localDownloader.handleLocalDownload(sock, from, text, msg.pushName, msg.key))
+                localDownload = await routerTrace.run(msg, traceContext, "localDownloader", () => localDownloader.handleLocalDownload(sock, from, text, savedContactFirstName, msg.key))
                 logPrivateLidPipeline("after-local-downloader", {
                     from,
                     senderJid,
@@ -4785,7 +4855,7 @@ async function startBot() {
 
                 // --- TELEGRAM STICKER CONVERTER ---
                 if (text.toLowerCase().startsWith(".tgstiker ")) {
-                    const handled = await tgStickerConverter.handleTelegramStickerCommand(sock, from, text, msg.pushName);
+                    const handled = await tgStickerConverter.handleTelegramStickerCommand(sock, from, text, savedContactFirstName);
                     if (handled) return;
                 }
 
@@ -4808,9 +4878,6 @@ async function startBot() {
 
             const customReplyMessage = customAutoReply.getReplyMessageForMessage(msg, [getOwnerControlJid(), ...PRIORITY_USERS]);
             if (customReplyMessage && !isMe) {
-                await sock.sendPresenceUpdate("composing", from);
-                await delay(900 + Math.random() * 900);
-                await sock.sendPresenceUpdate("paused", from);
                 await sendAutoReplyWithForward(customReplyMessage);
                 return;
             }
@@ -4862,14 +4929,6 @@ if (targetPdfUser) {
 
             if (afk.isAFK()) { await sendAutoReplyWithForward({ text: `Hai {name}, Fahri lagi ${afk.getReason()} nih. Nanti dibalas ya.` }); return }
 
-            const isPriority = PRIORITY_USERS.includes(from)
-
-            if (!isPriority) {
-                await sock.sendPresenceUpdate("composing", from)
-                await delay(1200 + Math.random() * 1800)
-                await sock.sendPresenceUpdate("paused", from)
-            }
-
             if (text && text.toLowerCase().startsWith("cuaca ")) {
                 try { await sendAutoReplyWithForward({ text: await getWeatherText(text.slice(6).trim()) })
                 } catch { await sendAutoReplyWithForward({ text: "Cuaca tidak ditemukan 😅" }) }
@@ -4885,11 +4944,11 @@ if (targetPdfUser) {
             const scheduledReply = scheduler.getActiveMessage()
             if (scheduledReply) { await sendAutoReplyWithForward({ text: scheduledReply }); return }
 
-            const lowText = text.toLowerCase()
-            if (lowText && lowText.includes("assalamualaikum")) { await sendAutoReplyWithForward({ text: "Waalaikumsalam, {name}! Ada yang bisa dibantu?" }); return }
-            if (lowText && (lowText.includes("siapa") || lowText.includes("nama"))) { await sendAutoReplyWithForward({ text: "Hai {name}, aku USERBOT Fahri. Ada pesan penting yang mau dititipkan?" }); return }
-            if (lowText && (lowText.includes("p") || lowText.includes("ping"))) { await sendAutoReplyWithForward({ text: "Pesanmu sudah diterima, {name} 👍" }); return }
-            if (lowText && (lowText.includes("lagi apa") || lowText.includes("sibuk"))) { await sendAutoReplyWithForward({ text: "Hai {name}, USERBOT sedang standby 😄" }); return }
+            const intentReply = text ? replies.getIntentReplyForMessage(msg, text) : null
+            if (intentReply) {
+                await sendAutoReplyWithForward({ text: intentReply })
+                return
+            }
 
             const hour = new Date().getHours()
             let timeGreeting = ""
@@ -4926,7 +4985,8 @@ if (targetPdfUser) {
                     try {
                         if (!autoReply.shouldProcessMessage(msg, { botEnabled: botStatus.getStatus() })) return
                         await autoReplyForwarder.sendAutoReply(sock, from, {
-                            text: "Apakah masih ingin dilanjutkan atau ada yang ingin ditanyakan lagi?"
+                            text: replies.getFollowUpForMessage(msg)
+                                || "Apakah masih ingin dilanjutkan atau ada yang ingin ditanyakan lagi?"
                         }, {
                             remoteJid: from,
                             msg,
@@ -4953,6 +5013,14 @@ if (targetPdfUser) {
 
 installProcessGuards()
 acquireInstanceLock()
+
+sourceWatchdog.startSourceWatchdog({
+    onChange({ paths }) {
+        const changed = paths.join(", ")
+        console.log(`[SOURCE WATCH] Perubahan stabil terdeteksi: ${changed}`)
+        return requestProcessShutdown(`source berubah (${changed})`, 0)
+    },
+})
 
 startBot().catch((error) => {
     console.log(`[START] Gagal start bot: ${error.message}`)

@@ -266,7 +266,7 @@ test("automatic scans use fast background mode", () => {
     const indexSource = fs.readFileSync(path.join(ROOT, "index.js"), "utf8");
     assert(indexSource.includes("stickerSafetyGuardBackground"));
     assert(indexSource.includes("fastMode: true"));
-    assert(indexSource.includes("if (isStickerMediaMessage) return"));
+    assert(indexSource.includes("if (isStickerMediaMessage && !autoReply.shouldProcessMessage(msg"));
 });
 
 test("automatic sticker OCR duplicate is off by default", () => {

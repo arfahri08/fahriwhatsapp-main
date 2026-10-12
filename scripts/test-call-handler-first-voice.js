@@ -14,6 +14,8 @@ process.env.CALL_TERMINATE_GRACE_MS = "250";
 process.env.CALL_FIRST_VOICE_ENABLED = "true";
 process.env.CALL_FIRST_VOICE_RESET_MS = "0";
 process.env.CALL_SPAM_THRESHOLD = "99";
+process.env.OWNER_JID = "6280000000000@s.whatsapp.net";
+process.env.CALL_OWNER_JID = "6280000000001@s.whatsapp.net";
 
 const callHandler = require("../modules/callHandler");
 
@@ -84,6 +86,20 @@ function emitCallLog(sock, remoteJid, callOutcome, durationSecs = 0) {
 
 async function run() {
     const sock = createSocket();
+    const identityReply = callHandler._getMissedCallReplyForTest(sock);
+    assert.deepStrictEqual(identityReply.mentions, ["6288287764273@s.whatsapp.net"], "mention wajib memakai sock.user.id yang dinormalisasi");
+    assert.match(identityReply.text, /@6288287764273\b/, "teks wajib menyebut nomor akun bot aktif");
+    assert.doesNotMatch(identityReply.text, /628000000000[01]/, "OWNER_JID dan CALL_OWNER_JID tidak boleh menjadi identitas balasan");
+
+    const credsReply = callHandler._getMissedCallReplyForTest({
+        authState: { creds: { me: { id: "6287777777777:4@s.whatsapp.net" } } },
+    });
+    assert.deepStrictEqual(credsReply.mentions, ["6287777777777@s.whatsapp.net"], "creds.me.id menjadi fallback kedua");
+
+    const genericReply = callHandler._getMissedCallReplyForTest({});
+    assert.deepStrictEqual(genericReply.mentions, [], "identitas kosong tidak boleh memakai owner sebagai fallback");
+    assert.doesNotMatch(genericReply.text, /@\d+/, "balasan generik tidak boleh mengandung mention");
+
     const spokenTexts = [];
     await callHandler.handleCall(sock, {
         ownerJids: [],
@@ -121,6 +137,7 @@ async function run() {
     messages = callerMessages(sock);
     assert.strictEqual(messages.length, 2, "panggilan kedua harus mendapat satu balasan tambahan");
     assert.match(messages[1].content.text, /tidak bisa dihubungi lewat telepon/i);
+    assert.deepStrictEqual(messages[1].content.mentions, ["6288287764273@s.whatsapp.net"]);
 
     sock.ev.emit("call", [{ id: "SECOND", from: CALLER, status: "terminate", duration: 0 }]);
     await wait();

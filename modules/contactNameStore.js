@@ -238,6 +238,29 @@ function resolveSavedContactName(jid) {
     return ""
 }
 
+function extractSavedContactFirstName(value) {
+    const savedName = cleanName(value)
+    if (!savedName) return ""
+    for (const token of savedName.split(" ")) {
+        const firstName = token
+            .replace(/[^\p{L}\p{N}._'-]/gu, "")
+            .slice(0, 40)
+        if (!firstName || !/\p{L}/u.test(firstName)) continue
+        if (/whatsapp|\.net$|^lid$/i.test(firstName)) continue
+        return firstName
+    }
+    return ""
+}
+
+function resolveSavedContactFirstName(jids = []) {
+    const candidates = Array.isArray(jids) ? jids : [jids]
+    for (const jid of candidates) {
+        const firstName = extractSavedContactFirstName(resolveSavedContactName(jid))
+        if (firstName) return firstName
+    }
+    return ""
+}
+
 function disposeContactNameStore() {
     stateCache = null
     stateFileCache = ""
@@ -247,7 +270,9 @@ module.exports = {
     rememberContact,
     rememberContacts,
     rememberIncomingMessage,
+    extractSavedContactFirstName,
     resolveContactName,
+    resolveSavedContactFirstName,
     resolveSavedContactName,
     normalizeContactJid,
     getJidNumber,
