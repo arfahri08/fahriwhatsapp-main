@@ -116,10 +116,12 @@ async function runTagTests() {
     assert.strictEqual(tag.options?.quoted, undefined, "bubble tagall inline tidak boleh quoted")
     assert.strictEqual(tag.content.mentions.filter(jid => jid === USER_PN).length, 1, "LID+PN user yang sama hanya sekali")
     assert(!tag.content.mentions.includes(BOT_JID), "akun bot harus dihilangkan dari tagall")
-    const inlineDelete = sock.calls.send.find(call => call.content.delete)
-    assert(inlineDelete, "command inline harus dihapus setelah mention berhasil")
-    assert.strictEqual(inlineDelete.content.delete.id, inlineMsg.key.id)
-    assert.strictEqual(inlineDelete.options?.[utility.TAGALL_OUTPUT_BYPASS_OPTION], true, "delete command tagall juga harus melewati output gate")
+    const inlineHide = sock.calls.send.find(call => call.content.text === "\u2063")
+    assert(inlineHide, "command inline harus langsung disamarkan sebelum mention diproses")
+    assert.strictEqual(inlineHide.content.delete, undefined, "tagall tidak boleh menghapus pesan")
+    assert.deepStrictEqual(inlineHide.content.edit, { ...inlineMsg.key, remoteJid: GROUP_JID })
+    assert.strictEqual(inlineHide.options?.[utility.TAGALL_OUTPUT_BYPASS_OPTION], true, "edit penyamaran tagall harus melewati output gate")
+    assert(sock.calls.send.indexOf(inlineHide) < sock.calls.send.indexOf(tag), "edit penyamaran harus dikirim sebelum hasil mention")
 
     const editSock = makeSock({ botAdmin: false })
     const editMsg = makeMsg(".tagall", {
@@ -132,14 +134,16 @@ async function runTagTests() {
         editMsg,
         makeContext(".tagall", { remote: makeRemote({ botEnabled: false }) })
     )
-    assert.strictEqual(editSock.calls.send.length, 1, "mode edit tidak boleh membuat bubble atau delete tambahan")
-    const edited = editSock.calls.send[0]
-    assert.deepStrictEqual(edited.content.edit, { ...editMsg.key, remoteJid: GROUP_JID })
-    assert.strictEqual(edited.content.delete, undefined, "mode edit tidak boleh mengirim delete")
-    assert(!edited.content.text.includes("@all"), "mode edit tidak boleh menampilkan @all")
-    assert(edited.content.text.split("\n").every(line => /^@\d+$/.test(line)), "mode edit harus berisi mention satu per baris")
-    assert.strictEqual(edited.options?.[utility.TAGALL_OUTPUT_BYPASS_OPTION], true, "edit tagall harus melewati output gate grup DEFAULT OFF")
-    assert.strictEqual(editMsg.message.extendedTextMessage.contextInfo.stanzaId, "quoted-original", "edit mempertahankan bubble command yang memiliki hubungan reply")
+    assert.strictEqual(editSock.calls.send.length, 2, "tagall kosong harus menyamarkan command lalu mengedit hasil")
+    const earlyHide = editSock.calls.send[0]
+    const tagResult = editSock.calls.send[1]
+    assert.strictEqual(earlyHide.content.text, "\u2063")
+    assert.strictEqual(earlyHide.content.delete, undefined, "tagall tidak boleh mengirim delete")
+    assert.deepStrictEqual(tagResult.content.edit, { ...editMsg.key, remoteJid: GROUP_JID })
+    assert(!tagResult.content.text.includes("@all"), "hasil tagall kosong tidak boleh menampilkan @all")
+    assert(tagResult.content.text.split("\n").every(line => /^@\d+$/.test(line)), "hasil tagall harus berisi mention satu per baris")
+    assert.strictEqual(tagResult.options?.[utility.TAGALL_OUTPUT_BYPASS_OPTION], true, "hasil tagall harus melewati output gate grup DEFAULT OFF")
+    assert.strictEqual(editMsg.message.extendedTextMessage.contextInfo.stanzaId, "quoted-original", "edit mempertahankan key bubble command yang memiliki hubungan reply")
 
     const failureSock = makeSock()
     failureSock.sendMessage = async () => { throw new Error("send mention gagal") }
@@ -148,7 +152,7 @@ async function runTagTests() {
         makeMsg(".tagall gagal", { fromMe: true, id: "tagall-failed" }),
         makeContext(".tagall gagal")
     )
-    assert.strictEqual(failureSock.calls.send.some(call => call.content.delete), false, "command tidak boleh dihapus jika mention gagal")
+    assert.strictEqual(failureSock.calls.send.some(call => call.content.delete), false, "tagall gagal tidak boleh mengirim delete")
 
     const indexSource = fs.readFileSync(path.join(__dirname, "..", "index.js"), "utf8")
     const fastRouteAt = indexSource.indexOf("if (isGroup && isMe && groupUtilityCommands.isTagallCommand(text))")

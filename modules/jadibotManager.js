@@ -71,6 +71,8 @@ async function defaultConnector(options = {}) {
         browser: ["USERBOT Jadibot", "Chrome", "1.0.0"],
         markOnlineOnConnect: false,
         syncFullHistory: false,
+        generateHighQualityLinkPreview: true,
+        linkPreviewImageThumbnailWidth: 400,
     })
     socket.ev.on("creds.update", saveCreds)
     let pairingCode = ""

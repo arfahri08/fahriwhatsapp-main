@@ -171,22 +171,10 @@ async function handleTagall(sock, msg, access, argument) {
     const mentions = buildParticipantMentions(access.policy.metadata, sock, access.context)
     const labels = mentions.map(jid => `@${groupRuntimePolicy.jidUser(jid)}`).join(" ")
     const inlineText = argument.trim()
-
-    if (inlineText) {
-        const sent = await sock.sendMessage(access.groupJid, {
-            text: `@all\n${inlineText}`,
-            mentions,
-        }, { [TAGALL_OUTPUT_BYPASS_OPTION]: true })
-        if (sent) {
-            await sock.sendMessage(access.groupJid, {
-                delete: { ...msg.key, remoteJid: access.groupJid },
-            }, { [TAGALL_OUTPUT_BYPASS_OPTION]: true })
-        }
-        return true
-    }
-
     await sock.sendMessage(access.groupJid, {
-        text: labels.split(" ").filter(Boolean).join("\n"),
+        text: inlineText
+            ? `@all\n${inlineText}`
+            : labels.split(" ").filter(Boolean).join("\n"),
         mentions,
         edit: { ...msg.key, remoteJid: access.groupJid },
     }, { [TAGALL_OUTPUT_BYPASS_OPTION]: true })
@@ -249,7 +237,24 @@ async function handleGroupUtilityCommand(sock, msg, context = {}) {
     const argument = text.slice(command.length).trim()
     if (command === ".tagall") {
         if (msg?.key?.fromMe !== true) return true
-        const tagallAccess = await resolveTagallAccess(sock, msg, context)
+        const groupJid = groupRuntimePolicy.normalizeJid(context.from || msg?.key?.remoteJid)
+        if (!groupRuntimePolicy.isGroupJid(groupJid)) return true
+
+        // Samarkan bubble command secepat mungkin tanpa menghapusnya. Pengambilan
+        // metadata grup besar berjalan bersamaan, lalu bubble yang sama diedit
+        // lagi menjadi hasil tagall.
+        const hideCommandPromise = sock.sendMessage(groupJid, {
+            text: "\u2063",
+            edit: { ...msg.key, remoteJid: groupJid },
+        }, { [TAGALL_OUTPUT_BYPASS_OPTION]: true }).catch(error => {
+            console.log("[TAGALL] Gagal menyamarkan bubble command", {
+                groupJid,
+                error: String(error?.message || error).slice(0, 180),
+            })
+        })
+        const accessPromise = resolveTagallAccess(sock, msg, context)
+        await hideCommandPromise
+        const tagallAccess = await accessPromise
         if (!tagallAccess) return true
         try {
             return await handleTagall(sock, msg, tagallAccess, argument)
